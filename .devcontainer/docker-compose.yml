@@ -1,0 +1,19 @@
+services:
+  gpu-service:
+    image: elainasuki/rc2026:mujoco
+    container_name: mujoco
+    environment:
+      - DISPLAY=${DISPLAY}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - OMP_WAIT_POLICY=passive
+      - TERM=xterm-256color
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - ./..:/mujoco
+    runtime: "nvidia"
+    tty: true
+    privileged: true
+    stdin_open: true
+    entrypoint: [ '/bin/bash' ]
+    working_dir: "/mujoco" # 指定默认工作目录
