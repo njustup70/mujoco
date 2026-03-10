@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, TransformStamped
+from nav_msgs.msg import Odometry
 from sensor_msgs.msg import JointState
+import tf2_ros
 import mujoco
 import mujoco.viewer
 import os
@@ -34,6 +36,10 @@ class MujocoRosBridge(Node):
             self.cmd_vel_callback,
             10)
         
+        # 发布里程计和 TF
+        self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
+        self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
+
         # 目标速度
         self.target_v_x = 0.0
         self.target_v_y = 0.0
@@ -52,6 +58,7 @@ class MujocoRosBridge(Node):
     def simulation_loop(self):
         # 使用 passive viewer，这样可以看到仿真画面
         with mujoco.viewer.launch_passive(self.model, self.data) as viewer:
+            last_pub_time = self.get_clock().now()
             while not self.stop_event.is_set() and viewer.is_running():
                 step_start = time.time()
 
@@ -64,6 +71,12 @@ class MujocoRosBridge(Node):
                 # 物理步进
                 mujoco.mj_step(self.model, self.data)
 
+                # 发布里程计数据 (建议频率 20-50Hz)
+                current_time = self.get_clock().now()
+                if (current_time - last_pub_time).nanoseconds > 20_000_000: # 50Hz
+                    self.publish_odometry(current_time)
+                    last_pub_time = current_time
+
                 # 同步查看器
                 viewer.sync()
 
@@ -72,9 +85,63 @@ class MujocoRosBridge(Node):
                 if time_until_next_step > 0:
                     time.sleep(time_until_next_step)
 
+    def publish_odometry(self, current_time):
+        # 获取 chassis 的全局位姿
+        # xpos 是 [x, y, z], xquat 是 [w, x, y, z]
+        pos = self.data.body('chassis').xpos
+        quat = self.data.body('chassis').xquat
+        
+        # 获取速度 (cvel 是 6D 空间速度: [ang_x, ang_y, ang_z, lin_x, lin_y, lin_z])
+        # 注意：cvel 是质心速度，且通常在世界坐标系下
+        vel = self.data.body('chassis').cvel
+        
+        # 1. 发布 TF 变换: odom -> base_link
+        t = TransformStamped()
+        t.header.stamp = current_time.to_msg()
+        t.header.frame_id = 'odom'
+        t.child_frame_id = 'base_link'
+        
+        t.transform.translation.x = pos[0]
+        t.transform.translation.y = pos[1]
+        t.transform.translation.z = pos[2]
+        
+        # MuJoCo quat 是 [w, x, y, z]，ROS 2 是 [x, y, z, w]
+        t.transform.rotation.w = quat[0]
+        t.transform.rotation.x = quat[1]
+        t.transform.rotation.y = quat[2]
+        t.transform.rotation.z = quat[3]
+        
+        self.tf_broadcaster.sendTransform(t)
+        
+        # 2. 发布 Odometry 消息
+        odom = Odometry()
+        odom.header.stamp = current_time.to_msg()
+        odom.header.frame_id = 'odom'
+        odom.child_frame_id = 'base_link'
+        
+        # 设置位置
+        odom.pose.pose.position.x = pos[0]
+        odom.pose.pose.position.y = pos[1]
+        odom.pose.pose.position.z = pos[2]
+        odom.pose.pose.orientation.w = quat[0]
+        odom.pose.pose.orientation.x = quat[1]
+        odom.pose.pose.orientation.y = quat[2]
+        odom.pose.pose.orientation.z = quat[3]
+        
+        # 设置速度 (lin_x, lin_y, lin_z, ang_x, ang_y, ang_z)
+        odom.twist.twist.linear.x = vel[3]
+        odom.twist.twist.linear.y = vel[4]
+        odom.twist.twist.linear.z = vel[5]
+        odom.twist.twist.angular.x = vel[0]
+        odom.twist.twist.angular.y = vel[1]
+        odom.twist.twist.angular.z = vel[2]
+        
+        self.odom_pub.publish(odom)
+
     def destroy_node(self):
         self.stop_event.set()
-        self.thread.join()
+        if self.thread.is_alive():
+            self.thread.join()
         super().destroy_node()
 
 def main(args=None):

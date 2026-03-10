@@ -2,7 +2,8 @@
     "name": "mujoco",
     "dockerComposeFile": "docker-compose.yml",
     "service": "gpu-service",
-    "workspaceFolder": "/mujoco",
+    "workspaceFolder": "/home/Elaina/ros2_ws",
+    "remoteUser": "Elaina",
     "shutdownAction": "stopCompose",
     "features": {
         "ghcr.io/meaningful-ooo/devcontainer-features/fish:2.0.0": {
