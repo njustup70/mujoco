@@ -3,6 +3,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
+from std_msgs.msg import Float32
 import tf2_ros
 import mujoco
 import mujoco.viewer
@@ -12,46 +13,60 @@ import time
 import numpy as np
 from ament_index_python.packages import get_package_share_directory
 import math
-
-def quaternion_to_euler(w, x, y, z):
-    # 将 MuJoCo 的 [w, x, y, z] 四元数转换为 Z-axis 偏航角 (yaw)
-    siny_cosp = 2 * (w * z + x * y)
-    cosy_cosp = 1 - 2 * (y * y + z * z)
-    return math.atan2(siny_cosp, cosy_cosp)
+from collections import deque
 
 class MujocoRosBridge(Node):
     def __init__(self):
         super().__init__('mujoco_ros2_bridge')
 
         # 1. 加载模型
-        package_share_dir = get_package_share_directory('mujoco_ros2_bridge')
-        model_path = os.path.join(package_share_dir, 'model', 'robot.xml')
+        model_path = '/home/up70/njustup70/mujoco/src/mujoco_ros2_bridge/model/robot.xml'
         if not os.path.exists(model_path):
             model_path = 'src/mujoco_ros2_bridge/model/robot.xml'
 
-        self.get_logger().info(f'Loading MuJoCo model from: {model_path}')
+        self.get_logger().info(f'Loading MuJoCo model: {model_path}')
         self.model = mujoco.MjModel.from_xml_path(model_path)
         self.data = mujoco.MjData(self.model)
 
         # 2. 通讯组件
-        self.cmd_vel_sub = self.create_subscription(
-            Twist,
-            'cmd_vel',
-            self.cmd_vel_callback,
-            10)
+        self.cmd_vel_sub = self.create_subscription(Twist, 'cmd_vel', self.cmd_vel_callback, 10)
         self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
+
+        self.num_wheels = 4
+        self.wheel_pubs = []
+        for i in range(self.num_wheels):
+            self.wheel_pubs.append({
+                's_target': self.create_publisher(Float32, f'wheel{i}/speed_target', 10),
+                's_actual': self.create_publisher(Float32, f'wheel{i}/speed_actual', 10),
+                'a_target': self.create_publisher(Float32, f'wheel{i}/angle_target', 10),
+                'a_actual': self.create_publisher(Float32, f'wheel{i}/angle_actual', 10)
+            })
 
         # 3. 状态变量
         self.target_v_x = 0.0
         self.target_v_y = 0.0
         self.target_v_yaw = 0.0
-        self.noise_std = 0.01 
+        
+        self.smooth_v_x = 0.0
+        self.smooth_v_y = 0.0
+        self.smooth_v_yaw = 0.0
+        
+        self.wheels_pos = [
+            (0.25, 0.2),   # Wheel 0 (FL)
+            (0.25, -0.2),  # Wheel 1 (FR)
+            (-0.25, 0.2),  # Wheel 2 (RL)
+            (-0.25, -0.2)  # Wheel 3 (RR)
+        ]
+        self.last_target_angles = [0.0] * self.num_wheels
 
-        # 4. 定时器：以 50Hz (0.02s) 发布数据
-        self.timer = self.create_timer(0.01, self.publish_odometry_callback)
+        self.reaction_delay_steps = 40 
+        self.cmd_buffers = [deque(maxlen=self.reaction_delay_steps + 1) for _ in range(self.num_wheels * 2)]
+        for i in range(self.num_wheels * 2):
+            for _ in range(self.reaction_delay_steps):
+                self.cmd_buffers[i].append(0.0)
 
-        # 5. 启动仿真线程
+        self.timer = self.create_timer(0.02, self.publish_odometry_callback)
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.simulation_loop)
         self.thread.start()
@@ -62,77 +77,86 @@ class MujocoRosBridge(Node):
         self.target_v_yaw = msg.angular.z
 
     def simulation_loop(self):
+        wheel_radius = 0.08
         with mujoco.viewer.launch_passive(self.model, self.data) as viewer:
             while not self.stop_event.is_set() and viewer.is_running():
                 step_start = time.time()
 
-                # 获取朝向并执行坐标变换
-                quat = self.data.body('chassis').xquat
-                yaw = quaternion_to_euler(quat[0], quat[1], quat[2], quat[3])
-                
-                cos_yaw = math.cos(yaw)
-                sin_yaw = math.sin(yaw)
-                
-                v_world_x = self.target_v_x * cos_yaw - self.target_v_y * sin_yaw
-                v_world_y = self.target_v_x * sin_yaw + self.target_v_y * cos_yaw
+                alpha = 0.05 
+                self.smooth_v_x = (1 - alpha) * self.smooth_v_x + alpha * self.target_v_x
+                self.smooth_v_y = (1 - alpha) * self.smooth_v_y + alpha * self.target_v_y
+                self.smooth_v_yaw = (1 - alpha) * self.smooth_v_yaw + alpha * self.target_v_yaw
 
-                # 应用指令并步进
-                self.data.ctrl[0] = v_world_x
-                self.data.ctrl[1] = v_world_y
-                self.data.ctrl[2] = self.target_v_yaw
+                for i in range(self.num_wheels):
+                    wx, wy = self.wheels_pos[i]
+                    v_ix = self.smooth_v_x - self.smooth_v_yaw * wy
+                    v_iy = self.smooth_v_y + self.smooth_v_yaw * wx
+                    
+                    speed = math.sqrt(v_ix**2 + v_iy**2)
+                    target_angle = self.last_target_angles[i]
+
+                    if speed > 0.01 or abs(self.smooth_v_yaw) > 0.01:
+                        target_angle = math.degrees(math.atan2(v_iy, v_ix))
+                        current_angle = self.last_target_angles[i]
+                        diff = (target_angle - current_angle + 180) % 360 - 180
+                        if abs(diff) > 90:
+                            target_angle = (target_angle + 180 + 180) % 360 - 180
+                            speed = -speed
+                        self.last_target_angles[i] = target_angle
+
+                    self.cmd_buffers[2*i].append(math.radians(self.last_target_angles[i]))
+                    self.cmd_buffers[2*i+1].append(speed / wheel_radius)
+
+                    delayed_steer = self.cmd_buffers[2*i].popleft()
+                    delayed_drive = self.cmd_buffers[2*i+1].popleft()
+
+                    self.data.actuator(f'steer{i}').ctrl[0] = delayed_steer
+                    self.data.actuator(f'drive{i}').ctrl[0] = delayed_drive
+
+                    # 发布数据 (保持静默运行)
+                    act_ang = math.degrees(self.data.joint(f'wheel{i}_steer').qpos[0])
+                    act_spd = self.data.joint(f'wheel{i}_drive').qvel[0] * wheel_radius
+                    self.wheel_pubs[i]['s_target'].publish(Float32(data=float(speed)))
+                    self.wheel_pubs[i]['s_actual'].publish(Float32(data=float(act_spd)))
+                    self.wheel_pubs[i]['a_target'].publish(Float32(data=float(self.last_target_angles[i])))
+                    self.wheel_pubs[i]['a_actual'].publish(Float32(data=float(act_ang)))
 
                 mujoco.mj_step(self.model, self.data)
-                
                 viewer.sync()
 
-                # 维持仿真步长
                 time_until_next_step = self.model.opt.timestep - (time.time() - step_start)
                 if time_until_next_step > 0:
                     time.sleep(time_until_next_step)
 
     def publish_odometry_callback(self):
-        # 定时器回调函数，50Hz 触发
         current_time = self.get_clock().now()
-        
-        # 获取当前最新位姿
         pos = self.data.body('chassis').xpos.copy()
         quat = self.data.body('chassis').xquat.copy()
         
-        # 1. 生成噪声数据
-        noise_x = np.random.normal(0, self.noise_std)
-        noise_y = np.random.normal(0, self.noise_std)
-        
-        noisy_pos_x = pos[0] + noise_x
-        noisy_pos_y = pos[1] + noise_y
-        noisy_pos_z = pos[2]
-
-        # 2. 发布 TF
         t = TransformStamped()
         t.header.stamp = current_time.to_msg()
         t.header.frame_id = 'odom'
         t.child_frame_id = 'base_link'
-        t.transform.translation.x = noisy_pos_x
-        t.transform.translation.y = noisy_pos_y
-        t.transform.translation.z = noisy_pos_z
+        t.transform.translation.x = pos[0]
+        t.transform.translation.y = pos[1]
+        t.transform.translation.z = pos[2]
         t.transform.rotation.w = quat[0]
         t.transform.rotation.x = quat[1]
         t.transform.rotation.y = quat[2]
         t.transform.rotation.z = quat[3]
         self.tf_broadcaster.sendTransform(t)
 
-        # 3. 发布里程计
         odom = Odometry()
         odom.header.stamp = current_time.to_msg()
         odom.header.frame_id = 'odom'
         odom.child_frame_id = 'base_link'
-        odom.pose.pose.position.x = noisy_pos_x
-        odom.pose.pose.position.y = noisy_pos_y
-        odom.pose.pose.position.z = noisy_pos_z
+        odom.pose.pose.position.x = pos[0]
+        odom.pose.pose.position.y = pos[1]
+        odom.pose.pose.position.z = pos[2]
         odom.pose.pose.orientation.w = quat[0]
         odom.pose.pose.orientation.x = quat[1]
         odom.pose.pose.orientation.y = quat[2]
         odom.pose.pose.orientation.z = quat[3]
-        
         self.odom_pub.publish(odom)
 
     def destroy_node(self):

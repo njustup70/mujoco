@@ -15,13 +15,13 @@ class TeleopJoyNode(Node):
             self.joy_callback,
             10)
         
-        # 恢复标准映射：
-        # 轴 1：左摇杆上下 (前后移动)
-        # 轴 0：左摇杆左右 (横向侧移)
-        # 轴 2：右摇杆左右 (原地旋转)
-        self.declare_parameter('axis_linear_x', 0)  
-        self.declare_parameter('axis_linear_y', 1)  
-        self.declare_parameter('axis_angular_z', 2) 
+        # 修正标准映射：
+        # Axis 1：左摇杆上下 (前后移动 -> Twist.linear.x)
+        # Axis 0：左摇杆左右 (横向侧移 -> Twist.linear.y)
+        # Axis 3：右摇杆左右 (原地旋转 -> Twist.angular.z)
+        self.declare_parameter('axis_linear_x', 1)  
+        self.declare_parameter('axis_linear_y', 0)  
+        self.declare_parameter('axis_angular_z', 3) 
         self.declare_parameter('scale_linear', 2.0)
         self.declare_parameter('scale_angular', 2.0)
 
@@ -34,17 +34,19 @@ class TeleopJoyNode(Node):
         scale_l = self.get_parameter('scale_linear').value
         scale_a = self.get_parameter('scale_angular').value
 
-        DEADZONE = 0.1
+        DEADZONE = 0.05
 
         # 1. 前后控制 (X轴)
-        # 向上推是负值，所以加负号实现前进
-        if abs(joy_msg.axes[axis_x]) > DEADZONE:
-            twist.linear.x = -joy_msg.axes[axis_x] * scale_l
+        if len(joy_msg.axes) > axis_x:
+            if abs(joy_msg.axes[axis_x]) > DEADZONE:
+                # 向上推通常是正值，如果您的手柄相反，请去掉负号
+                twist.linear.x = joy_msg.axes[axis_x] * scale_l
         
         # 2. 左右侧移 (Y轴)
-        # 向左推是正值，所以直接乘 scale 实现向左平移
-        if abs(joy_msg.axes[axis_y]) > DEADZONE:
-            twist.linear.y = joy_msg.axes[axis_y] * scale_l
+        if len(joy_msg.axes) > axis_y:
+            if abs(joy_msg.axes[axis_y]) > DEADZONE:
+                # 向左推通常是正值
+                twist.linear.y = joy_msg.axes[axis_y] * scale_l
         
         # 3. 旋转控制
         if len(joy_msg.axes) > axis_z:
