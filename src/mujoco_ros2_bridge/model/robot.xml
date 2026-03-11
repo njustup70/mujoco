@@ -19,12 +19,17 @@
             <joint name="root_y" type="slide" axis="0 1 0" damping="10"/>
             <joint name="root_z" type="hinge" axis="0 0 1" damping="5"/>
             
+            <!-- Main Chassis Body -->
             <geom type="box" size="0.3 0.2 0.05" rgba="0.8 0.3 0.3 1" mass="10"/>
 
-            <geom name="marker_forward" type="box" size="0.2 0.01 0.005" pos="0.1 0 0.06" rgba="1 0 0 1" contype="0" conaffinity="0"/>
-            <geom name="marker_forward_tip" type="box" size="0.03 0.03 0.005" pos="0.3 0 0.06" euler="0 0 45" rgba="1 0 0 1" contype="0" conaffinity="0"/>
-            <geom name="marker_left" type="box" size="0.01 0.15 0.005" pos="0 0.12 0.06" rgba="0 1 0 1" contype="0" conaffinity="0"/>
+            <!-- Front Head Marker (Green) -->
+            <geom name="head_marker" type="box" size="0.05 0.2 0.01" pos="0.25 0 0.055" rgba="0 1 0 1" contype="0" conaffinity="0" mass="0"/>
+            
+            <!-- Headlights (White Cylinders) -->
+            <geom name="headlight_left" type="cylinder" size="0.03 0.01" pos="0.3 0.12 0" zaxis="1 0 0" rgba="1 1 1 1" contype="0" conaffinity="0" mass="0"/>
+            <geom name="headlight_right" type="cylinder" size="0.03 0.01" pos="0.3 -0.12 0" zaxis="1 0 0" rgba="1 1 1 1" contype="0" conaffinity="0" mass="0"/>
 
+            <!-- Wheels (Decorative for now) -->
             <geom type="cylinder" size="0.08 0.04" pos="0.25  0.23 0" zaxis="0 1 0" rgba="0.2 0.2 0.2 1" contype="0" conaffinity="0"/>
             <geom type="cylinder" size="0.08 0.04" pos="-0.25  0.23 0" zaxis="0 1 0" rgba="0.2 0.2 0.2 1" contype="0" conaffinity="0"/>
             <geom type="cylinder" size="0.08 0.04" pos="0.25 -0.23 0" zaxis="0 1 0" rgba="0.2 0.2 0.2 1" contype="0" conaffinity="0"/>

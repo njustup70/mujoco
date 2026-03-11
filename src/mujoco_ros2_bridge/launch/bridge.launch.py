@@ -27,11 +27,17 @@ def generate_launch_description():
             }]
         ),
         
-        # 3. 可选：启动 ROS 2 标准手柄驱动 (需要先安装 ros-humble-joy)
+        # 3. 启动 ROS 2 标准手柄驱动
         Node(
             package='joy',
             executable='joy_node',
             name='joy_node',
-            output='screen'
+            output='screen',
+            parameters=[{
+                'device_id': 0,
+                'device_filepath': '/dev/input/js0',
+                'deadzone': 0.1,
+                'autorepeat_rate': 20.0,
+            }]
         )
     ])

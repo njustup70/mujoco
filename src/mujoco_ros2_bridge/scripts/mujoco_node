@@ -3,49 +3,55 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import JointState
 import tf2_ros
 import mujoco
 import mujoco.viewer
 import os
-from ament_index_python.packages import get_package_share_directory
 import threading
 import time
+import numpy as np
+from ament_index_python.packages import get_package_share_directory
+import math
+
+def quaternion_to_euler(w, x, y, z):
+    # 将 MuJoCo 的 [w, x, y, z] 四元数转换为 Z-axis 偏航角 (yaw)
+    siny_cosp = 2 * (w * z + x * y)
+    cosy_cosp = 1 - 2 * (y * y + z * z)
+    return math.atan2(siny_cosp, cosy_cosp)
 
 class MujocoRosBridge(Node):
     def __init__(self):
         super().__init__('mujoco_ros2_bridge')
-        
-        # 加载模型
+
+        # 1. 加载模型
         package_share_dir = get_package_share_directory('mujoco_ros2_bridge')
         model_path = os.path.join(package_share_dir, 'model', 'robot.xml')
-        
         if not os.path.exists(model_path):
-            # 兼容开发模式下的路径
             model_path = 'src/mujoco_ros2_bridge/model/robot.xml'
 
         self.get_logger().info(f'Loading MuJoCo model from: {model_path}')
-        
         self.model = mujoco.MjModel.from_xml_path(model_path)
         self.data = mujoco.MjData(self.model)
-        
-        # 订阅控制指令
+
+        # 2. 通讯组件
         self.cmd_vel_sub = self.create_subscription(
             Twist,
             'cmd_vel',
             self.cmd_vel_callback,
             10)
-        
-        # 发布里程计和 TF
         self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
 
-        # 目标速度
+        # 3. 状态变量
         self.target_v_x = 0.0
         self.target_v_y = 0.0
         self.target_v_yaw = 0.0
+        self.noise_std = 0.01 
 
-        # 启动 MuJoCo 仿真线程
+        # 4. 定时器：以 50Hz (0.02s) 发布数据
+        self.timer = self.create_timer(0.01, self.publish_odometry_callback)
+
+        # 5. 启动仿真线程
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.simulation_loop)
         self.thread.start()
@@ -56,85 +62,76 @@ class MujocoRosBridge(Node):
         self.target_v_yaw = msg.angular.z
 
     def simulation_loop(self):
-        # 使用 passive viewer，这样可以看到仿真画面
         with mujoco.viewer.launch_passive(self.model, self.data) as viewer:
-            last_pub_time = self.get_clock().now()
             while not self.stop_event.is_set() and viewer.is_running():
                 step_start = time.time()
 
-                # 将 ROS 指令映射到 MuJoCo Actuators
-                # 假设 actuator 顺序为 vel_x, vel_y, vel_yaw
-                self.data.ctrl[0] = self.target_v_x
-                self.data.ctrl[1] = self.target_v_y
+                # 获取朝向并执行坐标变换
+                quat = self.data.body('chassis').xquat
+                yaw = quaternion_to_euler(quat[0], quat[1], quat[2], quat[3])
+                
+                cos_yaw = math.cos(yaw)
+                sin_yaw = math.sin(yaw)
+                
+                v_world_x = self.target_v_x * cos_yaw - self.target_v_y * sin_yaw
+                v_world_y = self.target_v_x * sin_yaw + self.target_v_y * cos_yaw
+
+                # 应用指令并步进
+                self.data.ctrl[0] = v_world_x
+                self.data.ctrl[1] = v_world_y
                 self.data.ctrl[2] = self.target_v_yaw
 
-                # 物理步进
                 mujoco.mj_step(self.model, self.data)
-
-                # 发布里程计数据 (建议频率 20-50Hz)
-                current_time = self.get_clock().now()
-                if (current_time - last_pub_time).nanoseconds > 20_000_000: # 50Hz
-                    self.publish_odometry(current_time)
-                    last_pub_time = current_time
-
-                # 同步查看器
+                
                 viewer.sync()
 
-                # 控制频率
+                # 维持仿真步长
                 time_until_next_step = self.model.opt.timestep - (time.time() - step_start)
                 if time_until_next_step > 0:
                     time.sleep(time_until_next_step)
 
-    def publish_odometry(self, current_time):
-        # 获取 chassis 的全局位姿
-        # xpos 是 [x, y, z], xquat 是 [w, x, y, z]
-        pos = self.data.body('chassis').xpos
-        quat = self.data.body('chassis').xquat
+    def publish_odometry_callback(self):
+        # 定时器回调函数，50Hz 触发
+        current_time = self.get_clock().now()
         
-        # 获取速度 (cvel 是 6D 空间速度: [ang_x, ang_y, ang_z, lin_x, lin_y, lin_z])
-        # 注意：cvel 是质心速度，且通常在世界坐标系下
-        vel = self.data.body('chassis').cvel
+        # 获取当前最新位姿
+        pos = self.data.body('chassis').xpos.copy()
+        quat = self.data.body('chassis').xquat.copy()
         
-        # 1. 发布 TF 变换: odom -> base_link
+        # 1. 生成噪声数据
+        noise_x = np.random.normal(0, self.noise_std)
+        noise_y = np.random.normal(0, self.noise_std)
+        
+        noisy_pos_x = pos[0] + noise_x
+        noisy_pos_y = pos[1] + noise_y
+        noisy_pos_z = pos[2]
+
+        # 2. 发布 TF
         t = TransformStamped()
         t.header.stamp = current_time.to_msg()
         t.header.frame_id = 'odom'
         t.child_frame_id = 'base_link'
-        
-        t.transform.translation.x = pos[0]
-        t.transform.translation.y = pos[1]
-        t.transform.translation.z = pos[2]
-        
-        # MuJoCo quat 是 [w, x, y, z]，ROS 2 是 [x, y, z, w]
+        t.transform.translation.x = noisy_pos_x
+        t.transform.translation.y = noisy_pos_y
+        t.transform.translation.z = noisy_pos_z
         t.transform.rotation.w = quat[0]
         t.transform.rotation.x = quat[1]
         t.transform.rotation.y = quat[2]
         t.transform.rotation.z = quat[3]
-        
         self.tf_broadcaster.sendTransform(t)
-        
-        # 2. 发布 Odometry 消息
+
+        # 3. 发布里程计
         odom = Odometry()
         odom.header.stamp = current_time.to_msg()
         odom.header.frame_id = 'odom'
         odom.child_frame_id = 'base_link'
-        
-        # 设置位置
-        odom.pose.pose.position.x = pos[0]
-        odom.pose.pose.position.y = pos[1]
-        odom.pose.pose.position.z = pos[2]
+        odom.pose.pose.position.x = noisy_pos_x
+        odom.pose.pose.position.y = noisy_pos_y
+        odom.pose.pose.position.z = noisy_pos_z
         odom.pose.pose.orientation.w = quat[0]
         odom.pose.pose.orientation.x = quat[1]
         odom.pose.pose.orientation.y = quat[2]
         odom.pose.pose.orientation.z = quat[3]
-        
-        # 设置速度 (lin_x, lin_y, lin_z, ang_x, ang_y, ang_z)
-        odom.twist.twist.linear.x = vel[3]
-        odom.twist.twist.linear.y = vel[4]
-        odom.twist.twist.linear.z = vel[5]
-        odom.twist.twist.angular.x = vel[0]
-        odom.twist.twist.angular.y = vel[1]
-        odom.twist.twist.angular.z = vel[2]
         
         self.odom_pub.publish(odom)
 
