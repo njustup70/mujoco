@@ -35,13 +35,19 @@ class MPCModel:
 
         pos_err = casadi.sumsqr(self.state[0:2] - self.ref[0:2])
         # Use cosine yaw cost to avoid angle wrap jump at +-pi.
-        yaw_err = 1.0 - casadi.cos(self.state[2] - self.ref[2])
+        # yaw_err = 1.0 - casadi.cos(self.state[2] - self.ref[2])
+        angle_diff = self.state[2] - self.ref[2]
+        wrapped_angle_diff = casadi.atan2(casadi.sin(angle_diff), casadi.cos(angle_diff))
+
+
+        # 直接使用平方误差
+        yaw_err = casadi.sumsqr(wrapped_angle_diff)
         mterm = 8.0 * pos_err + 2.0 * yaw_err
         lterm = 8.0 * pos_err + 2.0 * yaw_err
 
         self.mpc = do_mpc.controller.MPC(self.model)
         self.mpc.set_objective(mterm=mterm, lterm=lterm)
-        self.mpc.set_param(n_horizon=25, t_step=dt)
+        self.mpc.set_param(n_horizon=20, t_step=dt)
         # self.mpc.set_rterm(u_input=casadi.diag(vertcat(0.2, 0.2, 0.1)))
 
         # Velocity bounds in body frame.

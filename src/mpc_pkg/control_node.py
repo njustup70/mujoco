@@ -15,7 +15,7 @@ class MPCControlNode(Node):
             self.odom_callback,
             10)
         self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
-        self.control.p_template['_p', 0, 'ref'] = np.array([1.0, 0.0, 1.47])
+        self.control.p_template['_p', 0, 'ref'] = np.array([10.0, 5.6, 2.0])
         self.initialized = False
 
     def odom_callback(self, msg: Odometry):
