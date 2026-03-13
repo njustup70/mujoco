@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+import rclpy
+from rclpy.node import Node
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import TransformStamped
+import tf2_ros
+import numpy as np
+import math
+
+def euler_from_quaternion(x, y, z, w):
+    """从四元数转换到欧拉角 (roll, pitch, yaw)"""
+    t0 = +2.0 * (w * x + y * z)
+    t1 = +1.0 - 2.0 * (x * x + y * y)
+    roll_x = math.atan2(t0, t1)
+    
+    t2 = +2.0 * (w * y - z * x)
+    t2 = +1.0 if t2 > +1.0 else t2
+    t2 = -1.0 if t2 < -1.0 else t2
+    pitch_y = math.asin(t2)
+    
+    t3 = +2.0 * (w * z + x * y)
+    t4 = +1.0 - 2.0 * (y * y + z * z)
+    yaw_z = math.atan2(t3, t4)
+    
+    return roll_x, pitch_y, yaw_z
+
+def quaternion_from_euler(ai, aj, ak):
+    """从欧拉角 (roll, pitch, yaw) 转换到四元数 [x, y, z, w]"""
+    ai /= 2.0
+    aj /= 2.0
+    ak /= 2.0
+    ci = math.cos(ai)
+    si = math.sin(ai)
+    cj = math.cos(aj)
+    sj = math.sin(aj)
+    ck = math.cos(ak)
+    sk = math.sin(ak)
+    cc = ci*ck
+    cs = ci*sk
+    sc = si*ck
+    ss = si*sk
+
+    q = np.empty((4, ))
+    q[0] = cj*sc - sj*cs
+    q[1] = cj*ss + sj*cc
+    q[2] = cj*cs - sj*sc
+    q[3] = cj*cc + sj*ss
+    return q
+
+class OdomNoiseNode(Node):
+    def __init__(self):
+        super().__init__('odom_noise_node')
+
+        # 1. 声明参数 (全部保留用于调试)
+        self.declare_parameter('noise_std_pos', 0.01)
+        self.declare_parameter('noise_std_ori', 0.01)
+        self.declare_parameter('noise_std_vel', 0.02)
+        self.declare_parameter('publish_tf', True)
+
+        self.noise_std_pos = self.get_parameter('noise_std_pos').value
+        self.noise_std_ori = self.get_parameter('noise_std_ori').value
+        self.noise_std_vel = self.get_parameter('noise_std_vel').value
+        self.publish_tf_flag = self.get_parameter('publish_tf').value
+
+        # 2. 订阅真值
+        self.create_subscription(Odometry, 'odom_truth', self.truth_callback, 10)
+
+        # 3. 发布者初始化 (仅保留标准 odom，删除了 odom_noise_100hz 误差话题)
+        self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
+        self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
+
+        # 状态变量
+        self.latest_truth = None
+        self.tick_count = 0
+        
+        # 缓存的 10Hz 数据
+        self.cached_pos_10hz = np.zeros(3)
+        self.cached_quat_10hz = [0.0, 0.0, 0.0, 1.0]
+        self.cached_vel_lin_10hz = np.zeros(3)
+        self.cached_vel_ang_10hz = np.zeros(3)
+        self.cached_noise_pos_10hz = [0.0, 0.0, 0.0]
+        self.cached_noise_quat_10hz = [0.0, 0.0, 0.0, 1.0]
+
+        # 100Hz 定时器
+        self.timer = self.create_timer(0.01, self.publish_callback)
+
+    def truth_callback(self, msg):
+        self.latest_truth = msg
+
+    def add_noise_to_pose_and_twist(self, true_msg):
+        """为位姿和速度添加随机噪声"""
+        noise_pos_x = np.random.normal(0, self.noise_std_pos)
+        noise_pos_y = np.random.normal(0, self.noise_std_pos)
+        
+        pos = np.array([
+            true_msg.pose.pose.position.x + noise_pos_x,
+            true_msg.pose.pose.position.y + noise_pos_y,
+            true_msg.pose.pose.position.z
+        ])
+
+        _, _, true_yaw = euler_from_quaternion(
+            true_msg.pose.pose.orientation.x,
+            true_msg.pose.pose.orientation.y,
+            true_msg.pose.pose.orientation.z,
+            true_msg.pose.pose.orientation.w
+        )
+        noise_yaw = np.random.normal(0, self.noise_std_ori)
+        new_quat = quaternion_from_euler(0, 0, true_yaw + noise_yaw)
+        noise_quat = quaternion_from_euler(0, 0, noise_yaw)
+
+        v_lin = np.array([
+            true_msg.twist.twist.linear.x,
+            true_msg.twist.twist.linear.y,
+            true_msg.twist.twist.linear.z
+        ]) + np.random.normal(0, self.noise_std_vel, 3)
+        
+        v_ang = np.array([
+            true_msg.twist.twist.angular.x,
+            true_msg.twist.twist.angular.y,
+            true_msg.twist.twist.angular.z
+        ]) + np.random.normal(0, self.noise_std_vel, 3)
+
+        return pos, new_quat, v_lin, v_ang, [noise_pos_x, noise_pos_y, 0.0], noise_quat
+
+    def publish_callback(self):
+        if self.latest_truth is None:
+            return
+
+        current_time = self.get_clock().now()
+        msg_time = current_time.to_msg()
+        
+        # --- [1] 高频路径 ---
+        # 即使删除了话题发布，TF 依然广播，方便调试观察
+        pos_100, quat_100, v_lin_100, v_ang_100, n_pos_100, n_quat_100 = self.add_noise_to_pose_and_twist(self.latest_truth)
+        if self.publish_tf_flag:
+            self.broadcast_tf(n_pos_100, n_quat_100, msg_time, 'base_link_truth', 'base_link_100hz')
+
+        # --- [2] 低频路径 (10Hz 数据更新频率) ---
+        if self.tick_count % 10 == 0:
+            pos_10, quat_10, v_lin_10, v_ang_10, n_pos_10, n_quat_10 = self.add_noise_to_pose_and_twist(self.latest_truth)
+            self.cached_pos_10hz = pos_10
+            self.cached_quat_10hz = quat_10
+            self.cached_vel_lin_10hz = v_lin_10
+            self.cached_vel_ang_10hz = v_ang_10
+            self.cached_noise_pos_10hz = n_pos_10
+            self.cached_noise_quat_10hz = n_quat_10
+
+        # 发布标准 odom 话题
+        self.publish_odom(self.odom_pub, self.cached_pos_10hz, self.cached_quat_10hz, 
+                        self.cached_vel_lin_10hz, self.cached_vel_ang_10hz, msg_time, 'odom', 'base_link')
+        if self.publish_tf_flag:
+            self.broadcast_tf(self.cached_noise_pos_10hz, self.cached_noise_quat_10hz, msg_time, 'base_link_truth', 'base_link_10hz')
+
+        self.tick_count += 1
+
+    def publish_odom(self, pub, pos, quat, v_lin, v_ang, stamp, frame_id, child_id):
+        odom = Odometry()
+        odom.header.stamp = stamp
+        odom.header.frame_id = frame_id
+        odom.child_frame_id = child_id
+        odom.pose.pose.position.x = pos[0]
+        odom.pose.pose.position.y = pos[1]
+        odom.pose.pose.position.z = pos[2]
+        odom.pose.pose.orientation.x = quat[0]
+        odom.pose.pose.orientation.y = quat[1]
+        odom.pose.pose.orientation.z = quat[2]
+        odom.pose.pose.orientation.w = quat[3]
+        odom.twist.twist.linear.x = v_lin[0]
+        odom.twist.twist.linear.y = v_lin[1]
+        odom.twist.twist.linear.z = v_lin[2]
+        odom.twist.twist.angular.x = v_ang[0]
+        odom.twist.twist.angular.y = v_ang[1]
+        odom.twist.twist.angular.z = v_ang[2]
+        pub.publish(odom)
+
+    def broadcast_tf(self, pos, quat, stamp, frame_id, child_id):
+        t = TransformStamped()
+        t.header.stamp = stamp
+        t.header.frame_id = frame_id
+        t.child_frame_id = child_id
+        t.transform.translation.x = pos[0]
+        t.transform.translation.y = pos[1]
+        t.transform.translation.z = pos[2]
+        t.transform.rotation.x = quat[0]
+        t.transform.rotation.y = quat[1]
+        t.transform.rotation.z = quat[2]
+        t.transform.rotation.w = quat[3]
+        self.tf_broadcaster.sendTransform(t)
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = OdomNoiseNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()

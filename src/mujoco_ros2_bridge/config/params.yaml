@@ -1,0 +1,13 @@
+odom_noise_node:
+  ros__parameters:
+    # 噪声强度 (单位: 米/弧度/秒) - 保留用于调试
+    noise_std_pos: 0.01    # 位置噪声 (1cm)
+    noise_std_ori: 0.01    # 姿态噪声 (约0.57度)
+    noise_std_vel: 0.02    # 速度噪声 (0.02m/s)
+
+    # 话题发布开关 (通过设置 false 来隐藏误差话题)
+    publish_100hz: false   # 关闭 odom_noise_100hz 话题
+    publish_10hz: true     # 开启标准 odom 话题 (包含 10Hz 更新的噪声数据)
+
+    # 是否发布 TF
+    publish_tf: true

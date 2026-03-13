@@ -3,7 +3,6 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Float32
 import tf2_ros
 import mujoco
 import mujoco.viewer
@@ -15,58 +14,50 @@ from ament_index_python.packages import get_package_share_directory
 import math
 from collections import deque
 
-class MujocoRosBridge(Node):
+class MujocoSimNode(Node):
     def __init__(self):
-        super().__init__('mujoco_ros2_bridge')
+        super().__init__('mujoco_sim_node')
+
+        # 0. 声明并读取参数
+        self.declare_parameter('use_viewer', True)
+        self.use_viewer = self.get_parameter('use_viewer').value
 
         # 1. 加载模型
-        model_path = '/home/up70/njustup70/mujoco/src/mujoco_ros2_bridge/model/robot.xml'
-        if not os.path.exists(model_path):
+        try:
+            package_share_dir = get_package_share_directory('mujoco_ros2_bridge')
+            model_path = os.path.join(package_share_dir, 'model', 'robot.xml')
+        except Exception:
             model_path = 'src/mujoco_ros2_bridge/model/robot.xml'
 
-        self.get_logger().info(f'Loading MuJoCo model: {model_path}')
+        self.get_logger().info(f'Loading MuJoCo model from: {model_path}')
         self.model = mujoco.MjModel.from_xml_path(model_path)
         self.data = mujoco.MjData(self.model)
 
         # 2. 通讯组件
         self.cmd_vel_sub = self.create_subscription(Twist, 'cmd_vel', self.cmd_vel_callback, 10)
-        self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
+        # 发布真值里程计 (Ground Truth)
+        self.odom_truth_pub = self.create_publisher(Odometry, 'odom_truth', 10)
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
-
-        self.num_wheels = 4
-        self.wheel_pubs = []
-        for i in range(self.num_wheels):
-            self.wheel_pubs.append({
-                's_target': self.create_publisher(Float32, f'wheel{i}/speed_target', 10),
-                's_actual': self.create_publisher(Float32, f'wheel{i}/speed_actual', 10),
-                'a_target': self.create_publisher(Float32, f'wheel{i}/angle_target', 10),
-                'a_actual': self.create_publisher(Float32, f'wheel{i}/angle_actual', 10)
-            })
 
         # 3. 状态变量
         self.target_v_x = 0.0
         self.target_v_y = 0.0
         self.target_v_yaw = 0.0
-        
         self.smooth_v_x = 0.0
         self.smooth_v_y = 0.0
         self.smooth_v_yaw = 0.0
         
-        self.wheels_pos = [
-            (0.25, 0.2),   # Wheel 0 (FL)
-            (0.25, -0.2),  # Wheel 1 (FR)
-            (-0.25, 0.2),  # Wheel 2 (RL)
-            (-0.25, -0.2)  # Wheel 3 (RR)
-        ]
-        self.last_target_angles = [0.0] * self.num_wheels
+        self.wheels_pos = [(0.25, 0.2), (0.25, -0.2), (-0.25, 0.2), (-0.25, -0.2)]
+        self.last_target_angles = [0.0] * 4
 
+        # 控制延迟缓冲
         self.reaction_delay_steps = 40 
-        self.cmd_buffers = [deque(maxlen=self.reaction_delay_steps + 1) for _ in range(self.num_wheels * 2)]
-        for i in range(self.num_wheels * 2):
-            for _ in range(self.reaction_delay_steps):
-                self.cmd_buffers[i].append(0.0)
+        self.cmd_buffers = [deque([0.0]*self.reaction_delay_steps, maxlen=self.reaction_delay_steps) for _ in range(8)]
 
-        self.timer = self.create_timer(0.02, self.publish_odometry_callback)
+        # 4. 定时器：100Hz 发布真值和 TF
+        self.timer = self.create_timer(0.01, self.publish_truth_callback)
+
+        # 5. 启动仿真线程
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.simulation_loop)
         self.thread.start()
@@ -78,65 +69,84 @@ class MujocoRosBridge(Node):
 
     def simulation_loop(self):
         wheel_radius = 0.08
-        with mujoco.viewer.launch_passive(self.model, self.data) as viewer:
-            while not self.stop_event.is_set() and viewer.is_running():
-                step_start = time.time()
+        viewer = None
+        
+        # 仅在启用 viewer 且存在 DISPLAY 环境变量时尝试启动
+        if self.use_viewer and os.environ.get('DISPLAY'):
+            try:
+                viewer = mujoco.viewer.launch_passive(self.model, self.data)
+                self.get_logger().info("MuJoCo viewer launched successfully.")
+            except Exception as e:
+                self.get_logger().error(f"Failed to launch MuJoCo viewer: {e}. Running in headless mode.")
+                viewer = None
+        else:
+            self.get_logger().info("Running in headless mode (no viewer).")
 
-                alpha = 0.05 
-                self.smooth_v_x = (1 - alpha) * self.smooth_v_x + alpha * self.target_v_x
-                self.smooth_v_y = (1 - alpha) * self.smooth_v_y + alpha * self.target_v_y
-                self.smooth_v_yaw = (1 - alpha) * self.smooth_v_yaw + alpha * self.target_v_yaw
+        while not self.stop_event.is_set():
+            if viewer is not None and not viewer.is_running():
+                break
+                
+            step_start = time.time()
+            
+            # 平滑处理和死区控制
+            alpha = 0.05
+            self.smooth_v_x = (1 - alpha) * self.smooth_v_x + alpha * self.target_v_x
+            self.smooth_v_y = (1 - alpha) * self.smooth_v_y + alpha * self.target_v_y
+            self.smooth_v_yaw = (1 - alpha) * self.smooth_v_yaw + alpha * self.target_v_yaw
+            
+            if abs(self.smooth_v_x) < 1e-3: self.smooth_v_x = 0.0
+            if abs(self.smooth_v_y) < 1e-3: self.smooth_v_y = 0.0
+            if abs(self.smooth_v_yaw) < 1e-3: self.smooth_v_yaw = 0.0
 
-                for i in range(self.num_wheels):
-                    wx, wy = self.wheels_pos[i]
-                    v_ix = self.smooth_v_x - self.smooth_v_yaw * wy
-                    v_iy = self.smooth_v_y + self.smooth_v_yaw * wx
-                    
-                    speed = math.sqrt(v_ix**2 + v_iy**2)
-                    target_angle = self.last_target_angles[i]
+            for i in range(4):
+                wx, wy = self.wheels_pos[i]
+                v_ix = self.smooth_v_x - self.smooth_v_yaw * wy
+                v_iy = self.smooth_v_y + self.smooth_v_yaw * wx
+                
+                speed = math.sqrt(v_ix**2 + v_iy**2)
+                target_angle = self.last_target_angles[i]
+                if speed > 0.01 or abs(self.smooth_v_yaw) > 0.01:
+                    target_angle = math.degrees(math.atan2(v_iy, v_ix))
+                    self.last_target_angles[i] = target_angle
 
-                    if speed > 0.01 or abs(self.smooth_v_yaw) > 0.01:
-                        target_angle = math.degrees(math.atan2(v_iy, v_ix))
-                        current_angle = self.last_target_angles[i]
-                        diff = (target_angle - current_angle + 180) % 360 - 180
-                        if abs(diff) > 90:
-                            target_angle = (target_angle + 180 + 180) % 360 - 180
-                            speed = -speed
-                        self.last_target_angles[i] = target_angle
+                self.data.actuator(f'steer{i}').ctrl[0] = math.radians(target_angle)
+                self.data.actuator(f'drive{i}').ctrl[0] = speed / wheel_radius
 
-                    self.cmd_buffers[2*i].append(math.radians(self.last_target_angles[i]))
-                    self.cmd_buffers[2*i+1].append(speed / wheel_radius)
-
-                    delayed_steer = self.cmd_buffers[2*i].popleft()
-                    delayed_drive = self.cmd_buffers[2*i+1].popleft()
-
-                    self.data.actuator(f'steer{i}').ctrl[0] = delayed_steer
-                    self.data.actuator(f'drive{i}').ctrl[0] = delayed_drive
-
-                    # 发布数据 (保持静默运行)
-                    act_ang = math.degrees(self.data.joint(f'wheel{i}_steer').qpos[0])
-                    act_spd = self.data.joint(f'wheel{i}_drive').qvel[0] * wheel_radius
-                    self.wheel_pubs[i]['s_target'].publish(Float32(data=float(speed)))
-                    self.wheel_pubs[i]['s_actual'].publish(Float32(data=float(act_spd)))
-                    self.wheel_pubs[i]['a_target'].publish(Float32(data=float(self.last_target_angles[i])))
-                    self.wheel_pubs[i]['a_actual'].publish(Float32(data=float(act_ang)))
-
-                mujoco.mj_step(self.model, self.data)
+            mujoco.mj_step(self.model, self.data)
+            if viewer is not None:
                 viewer.sync()
+                
+            time_until_next_step = self.model.opt.timestep - (time.time() - step_start)
+            if time_until_next_step > 0:
+                time.sleep(time_until_next_step)
+        
+        if viewer is not None:
+            viewer.close()
 
-                time_until_next_step = self.model.opt.timestep - (time.time() - step_start)
-                if time_until_next_step > 0:
-                    time.sleep(time_until_next_step)
-
-    def publish_odometry_callback(self):
+    def publish_truth_callback(self):
         current_time = self.get_clock().now()
         pos = self.data.body('chassis').xpos.copy()
         quat = self.data.body('chassis').xquat.copy()
         
+        # 1. 发布 Odometry 消息
+        odom = Odometry()
+        odom.header.stamp = current_time.to_msg()
+        odom.header.frame_id = 'odom'
+        odom.child_frame_id = 'base_link_truth'
+        odom.pose.pose.position.x = pos[0]
+        odom.pose.pose.position.y = pos[1]
+        odom.pose.pose.position.z = pos[2]
+        odom.pose.pose.orientation.w = quat[0]
+        odom.pose.pose.orientation.x = quat[1]
+        odom.pose.pose.orientation.y = quat[2]
+        odom.pose.pose.orientation.z = quat[3]
+        self.odom_truth_pub.publish(odom)
+
+        # 2. 广播 TF 变换: odom -> base_link_truth (真值)
         t = TransformStamped()
         t.header.stamp = current_time.to_msg()
         t.header.frame_id = 'odom'
-        t.child_frame_id = 'base_link'
+        t.child_frame_id = 'base_link_truth'
         t.transform.translation.x = pos[0]
         t.transform.translation.y = pos[1]
         t.transform.translation.z = pos[2]
@@ -146,19 +156,6 @@ class MujocoRosBridge(Node):
         t.transform.rotation.z = quat[3]
         self.tf_broadcaster.sendTransform(t)
 
-        odom = Odometry()
-        odom.header.stamp = current_time.to_msg()
-        odom.header.frame_id = 'odom'
-        odom.child_frame_id = 'base_link'
-        odom.pose.pose.position.x = pos[0]
-        odom.pose.pose.position.y = pos[1]
-        odom.pose.pose.position.z = pos[2]
-        odom.pose.pose.orientation.w = quat[0]
-        odom.pose.pose.orientation.x = quat[1]
-        odom.pose.pose.orientation.y = quat[2]
-        odom.pose.pose.orientation.z = quat[3]
-        self.odom_pub.publish(odom)
-
     def destroy_node(self):
         self.stop_event.set()
         if self.thread.is_alive():
@@ -167,7 +164,7 @@ class MujocoRosBridge(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = MujocoRosBridge()
+    node = MujocoSimNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
