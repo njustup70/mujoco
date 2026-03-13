@@ -77,8 +77,8 @@ class MujocoRosBridge(Node):
                 v_world_y = self.target_v_x * sin_yaw + self.target_v_y * cos_yaw
 
                 # 应用指令并步进
-                self.data.ctrl[0] = v_world_x
-                self.data.ctrl[1] = v_world_y
+                self.data.ctrl[0] = -v_world_y
+                self.data.ctrl[1] = v_world_x
                 self.data.ctrl[2] = self.target_v_yaw
 
                 mujoco.mj_step(self.model, self.data)
