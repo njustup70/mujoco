@@ -44,20 +44,22 @@ class MPCModel:
 
         # 直接使用平方误差
         yaw_err = casadi.sumsqr(wrapped_angle_diff)
+        #结束代价，符号函数
         mterm = 8.0 * pos_err + 2.0 * yaw_err
-        lterm = 8.0 * pos_err + 2.0 * yaw_err
-
+        #过程代价
+        lterm = 8.0 * pos_err + 2.0 * yaw_err 
+       
         self.mpc = do_mpc.controller.MPC(self.model)
+        self.mpc.set_rterm(u_input=np.array([0.2, 0.2, 0.5])) #直接用数值
         self.mpc.set_objective(mterm=mterm, lterm=lterm)
         self.mpc.set_param(n_horizon=20, t_step=dt)
-        # self.mpc.set_rterm(u_input=casadi.diag(vertcat(0.2, 0.2, 0.1)))
 
         # Velocity bounds in body frame.
-        self.mpc.bounds['lower', '_u', 'u_input'] = np.array([[-1.2], [-1.2], [-2.0]])
-        self.mpc.bounds['upper', '_u', 'u_input'] = np.array([[1.2], [1.2], [2.0]])
+        self.mpc.bounds['lower', '_u', 'u_input'] = np.array([[-3.0], [-3.0], [-2.0]])
+        self.mpc.bounds['upper', '_u', 'u_input'] = np.array([[3.0], [3.0], [2.0]])
 
         # 参数注册
-        p_template=self.mpc.get_p_template(0)
+        p_template=self.mpc.get_p_template(1)
         assert p_template is not None
         self.p_template = p_template
         def p_fun(_t_now: float):
@@ -65,4 +67,17 @@ class MPCModel:
 
         self.mpc.set_p_fun(p_fun)
         self.mpc.setup()
-
+    def set_state_init(self, x0):
+        '''设置 MPC 的初始状态'''
+        self.mpc.x0 = x0
+        self.mpc.set_initial_guess()
+    def update(self,x):
+        assert isinstance(x, np.ndarray) and x.shape ==self.u_vec.shape
+        '''根据当前状态 x 计算控制输入'''
+        u = self.mpc.make_step(x)
+        #u是二维数组，形状为 (3, 1)，我们需要将其转换为一维数组
+        return u.flatten()
+    def set_target_point(self, target:np.ndarray):
+        '''设置 MPC 的目标点'''
+        assert len(target) == 3
+        self.p_template['_p', 0, 'ref'] =target
