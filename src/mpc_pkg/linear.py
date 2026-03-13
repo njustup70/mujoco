@@ -16,8 +16,10 @@ def get_spline_path_with_yaw(x_points, y_points, start_yaw, end_yaw, num_samples
 
     # 3. 建立三次样条插值函数
     # bc_type=((1, val_start), (1, val_end)) 表示指定一阶导数
-    cs_x = CubicSpline(t, x_points, bc_type=((1, v_start[0]), (1, v_end[0])))
-    cs_y = CubicSpline(t, y_points, bc_type=((1, v_start[1]), (1, v_end[1])))
+    from typing import Any, cast
+    bc_type=cast(Any, ((1, v_start[0]), (1, v_end[0])))
+    cs_x = CubicSpline(t, x_points, bc_type=bc_type)
+    cs_y = CubicSpline(t, y_points, bc_type=bc_type)
 
     # 4. 生成采样
     t_fine = np.linspace(0, t[-1], num_samples)
