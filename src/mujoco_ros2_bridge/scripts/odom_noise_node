@@ -51,21 +51,18 @@ class OdomNoiseNode(Node):
     def __init__(self):
         super().__init__('odom_noise_node')
 
-        # 1. 声明参数 (全部保留用于调试)
+        # 1. 声明参数
         self.declare_parameter('noise_std_pos', 0.01)
         self.declare_parameter('noise_std_ori', 0.01)
         self.declare_parameter('noise_std_vel', 0.02)
+        self.declare_parameter('publish_100hz', True)
+        self.declare_parameter('publish_10hz', True)
         self.declare_parameter('publish_tf', True)
-
-        self.noise_std_pos = self.get_parameter('noise_std_pos').value
-        self.noise_std_ori = self.get_parameter('noise_std_ori').value
-        self.noise_std_vel = self.get_parameter('noise_std_vel').value
-        self.publish_tf_flag = self.get_parameter('publish_tf').value
 
         # 2. 订阅真值
         self.create_subscription(Odometry, 'odom_truth', self.truth_callback, 10)
 
-        # 3. 发布者初始化 (仅保留标准 odom，删除了 odom_noise_100hz 误差话题)
+        # 3. 发布者
         self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
 
@@ -73,83 +70,97 @@ class OdomNoiseNode(Node):
         self.latest_truth = None
         self.tick_count = 0
         
-        # 缓存的 10Hz 数据
-        self.cached_pos_10hz = np.zeros(3)
-        self.cached_quat_10hz = [0.0, 0.0, 0.0, 1.0]
-        self.cached_vel_lin_10hz = np.zeros(3)
-        self.cached_vel_ang_10hz = np.zeros(3)
-        self.cached_noise_pos_10hz = [0.0, 0.0, 0.0]
-        self.cached_noise_quat_10hz = [0.0, 0.0, 0.0, 1.0]
+        # 缓存的 10Hz 噪声数据
+        self.n_pos_10 = [0.0, 0.0, 0.0]
+        self.n_yaw_10 = 0.0
+        self.n_quat_10 = [0.0, 0.0, 0.0, 1.0]
 
-        # 100Hz 定时器
         self.timer = self.create_timer(0.01, self.publish_callback)
 
     def truth_callback(self, msg):
         self.latest_truth = msg
 
-    def add_noise_to_pose_and_twist(self, true_msg):
-        """为位姿和速度添加随机噪声"""
-        noise_pos_x = np.random.normal(0, self.noise_std_pos)
-        noise_pos_y = np.random.normal(0, self.noise_std_pos)
-        
-        pos = np.array([
-            true_msg.pose.pose.position.x + noise_pos_x,
-            true_msg.pose.pose.position.y + noise_pos_y,
-            true_msg.pose.pose.position.z
-        ])
-
-        _, _, true_yaw = euler_from_quaternion(
-            true_msg.pose.pose.orientation.x,
-            true_msg.pose.pose.orientation.y,
-            true_msg.pose.pose.orientation.z,
-            true_msg.pose.pose.orientation.w
-        )
-        noise_yaw = np.random.normal(0, self.noise_std_ori)
-        new_quat = quaternion_from_euler(0, 0, true_yaw + noise_yaw)
-        noise_quat = quaternion_from_euler(0, 0, noise_yaw)
-
-        v_lin = np.array([
-            true_msg.twist.twist.linear.x,
-            true_msg.twist.twist.linear.y,
-            true_msg.twist.twist.linear.z
-        ]) + np.random.normal(0, self.noise_std_vel, 3)
-        
-        v_ang = np.array([
-            true_msg.twist.twist.angular.x,
-            true_msg.twist.twist.angular.y,
-            true_msg.twist.twist.angular.z
-        ]) + np.random.normal(0, self.noise_std_vel, 3)
-
-        return pos, new_quat, v_lin, v_ang, [noise_pos_x, noise_pos_y, 0.0], noise_quat
+    def generate_noise(self, std_pos, std_ori):
+        """生成随机噪声"""
+        nx = np.random.normal(0, std_pos)
+        ny = np.random.normal(0, std_pos)
+        nyaw = np.random.normal(0, std_ori)
+        return [nx, ny, 0.0], nyaw
 
     def publish_callback(self):
         if self.latest_truth is None:
             return
 
+        # 实时读取参数以便调试
+        std_pos = self.get_parameter('noise_std_pos').value
+        std_ori = self.get_parameter('noise_std_ori').value
+        std_vel = self.get_parameter('noise_std_vel').value
+        pub_100 = self.get_parameter('publish_100hz').value
+        pub_10 = self.get_parameter('publish_10hz').value
+        pub_tf = self.get_parameter('publish_tf').value
+
         current_time = self.get_clock().now()
         msg_time = current_time.to_msg()
         
-        # --- [1] 高频路径 ---
-        # 即使删除了话题发布，TF 依然广播，方便调试观察
-        pos_100, quat_100, v_lin_100, v_ang_100, n_pos_100, n_quat_100 = self.add_noise_to_pose_and_twist(self.latest_truth)
-        if self.publish_tf_flag:
-            self.broadcast_tf(n_pos_100, n_quat_100, msg_time, 'base_link_truth', 'base_link_100hz')
+        # --- 1. 获取真值基础 ---
+        true_pos = np.array([self.latest_truth.pose.pose.position.x, 
+                             self.latest_truth.pose.pose.position.y, 
+                             self.latest_truth.pose.pose.position.z])
+        _, _, true_yaw = euler_from_quaternion(
+            self.latest_truth.pose.pose.orientation.x,
+            self.latest_truth.pose.pose.orientation.y,
+            self.latest_truth.pose.pose.orientation.z,
+            self.latest_truth.pose.pose.orientation.w
+        )
 
-        # --- [2] 低频路径 (10Hz 数据更新频率) ---
+        # --- 2. 生成各层噪声 ---
+        # 100Hz 噪声
+        n_pos_100, n_yaw_100 = self.generate_noise(std_pos, std_ori)
+        n_quat_100 = quaternion_from_euler(0, 0, n_yaw_100)
+        
+        # 10Hz 噪声 (每10帧更新)
         if self.tick_count % 10 == 0:
-            pos_10, quat_10, v_lin_10, v_ang_10, n_pos_10, n_quat_10 = self.add_noise_to_pose_and_twist(self.latest_truth)
-            self.cached_pos_10hz = pos_10
-            self.cached_quat_10hz = quat_10
-            self.cached_vel_lin_10hz = v_lin_10
-            self.cached_vel_ang_10hz = v_ang_10
-            self.cached_noise_pos_10hz = n_pos_10
-            self.cached_noise_quat_10hz = n_quat_10
+            self.n_pos_10, self.n_yaw_10 = self.generate_noise(std_pos, std_ori)
+            self.n_quat_10 = quaternion_from_euler(0, 0, self.n_yaw_10)
 
-        # 发布标准 odom 话题
-        self.publish_odom(self.odom_pub, self.cached_pos_10hz, self.cached_quat_10hz, 
-                        self.cached_vel_lin_10hz, self.cached_vel_ang_10hz, msg_time, 'odom', 'base_link')
-        if self.publish_tf_flag:
-            self.broadcast_tf(self.cached_noise_pos_10hz, self.cached_noise_quat_10hz, msg_time, 'base_link_truth', 'base_link_10hz')
+        # --- 3. 核心逻辑：构建 TF 树和计算最终位置 ---
+        final_pos = true_pos.copy()
+        final_yaw = true_yaw
+
+        if pub_100 and pub_10:
+            # A. 叠加/串联模式: truth -> 100hz -> base_link
+            if pub_tf:
+                self.broadcast_tf(n_pos_100, n_quat_100, msg_time, 'base_link_truth', 'base_link_100hz')
+                self.broadcast_tf(self.n_pos_10, self.n_quat_10, msg_time, 'base_link_100hz', 'base_link')
+            final_pos += np.array(n_pos_100) + np.array(self.n_pos_10)
+            final_yaw += n_yaw_100 + self.n_yaw_10
+            
+        elif pub_100:
+            # B. 仅 100Hz 模式: truth -> base_link (使用 100Hz 噪声)
+            if pub_tf:
+                self.broadcast_tf(n_pos_100, n_quat_100, msg_time, 'base_link_truth', 'base_link_100hz')
+            final_pos += np.array(n_pos_100)
+            final_yaw += n_yaw_100
+            
+        elif pub_10:
+            # C. 仅 10Hz 模式: truth -> base_link (使用 10Hz 噪声)
+            if pub_tf:
+                self.broadcast_tf(self.n_pos_10, self.n_quat_10, msg_time, 'base_link_truth', 'base_link')
+            final_pos += np.array(self.n_pos_10)
+            final_yaw += self.n_yaw_10
+        
+        else:
+            # D. 无噪声模式: truth -> base_link (重合)
+            if pub_tf:
+                self.broadcast_tf([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], msg_time, 'base_link_truth', 'base_link')
+
+        # --- 4. 发布最终的 odom 话题 ---
+        final_quat = quaternion_from_euler(0, 0, final_yaw)
+        v_lin = np.array([self.latest_truth.twist.twist.linear.x, 
+                          self.latest_truth.twist.twist.linear.y, 0.0]) + np.random.normal(0, std_vel, 3)
+        v_ang = np.array([0.0, 0.0, self.latest_truth.twist.twist.angular.z]) + np.random.normal(0, std_vel, 3)
+        
+        self.publish_odom(self.odom_pub, final_pos, final_quat, v_lin, v_ang, msg_time, 'odom', 'base_link')
 
         self.tick_count += 1
 
