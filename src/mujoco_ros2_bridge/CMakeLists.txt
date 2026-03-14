@@ -15,9 +15,9 @@ install(
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# Install launch and model directories
+# Install launch, model and config directories
 install(
-  DIRECTORY launch model
+  DIRECTORY launch model config
   DESTINATION share/${PROJECT_NAME}
 )
 
