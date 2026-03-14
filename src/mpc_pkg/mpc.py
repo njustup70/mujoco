@@ -7,6 +7,8 @@ from casadi import vertcat, cos, sin
 import numpy as np
 from decorder import time_print
 import asyncio
+
+
 class MPCModel:
     def __init__(self, dt):
         model_type = 'discrete'
@@ -58,6 +60,7 @@ class MPCModel:
         set_up_settings={
             'n_horizon': 20,
             't_step': dt,
+            'store_full_solution': False,
             'nlpsol_opts': {
                 'ipopt.print_level': 2,  # 0 关闭 Ipopt 输出 (默认是 5)
                 'print_time': False,     # 关闭 CasADi 的计时输出

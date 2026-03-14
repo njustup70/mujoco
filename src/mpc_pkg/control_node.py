@@ -3,7 +3,8 @@ from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
 from mpc import MPCModel
-
+import foxglove
+from mpc_pkg.foxgloveTools import  FoxgloveVisual
 class MPCControlNode(Node):
     def __init__(self):
         super().__init__('mpc_control_node')
@@ -23,6 +24,8 @@ class MPCControlNode(Node):
         self.thread=threading.Thread(target=self.loop.run_forever,daemon=True)
         self.thread.start()
         # asyncio.run_coroutine_threadsafe(test(), self.loop)
+        # self.server=foxglove.start_server(port=8766)
+        self.server=FoxgloveVisual(port=8766)
     def odom_callback(self, msg: Odometry):
         # 从 Odometry 消息中提取测量值
         measured_x = msg.pose.pose.position.x
@@ -48,7 +51,10 @@ class MPCControlNode(Node):
         # vw = float(u[2][0])
         import asyncio
         u=asyncio.run_coroutine_threadsafe(self.control.async_update(x_mpc), self.loop).result()  # 等待结果
-        # u=self.control.update(x_mpc)
+        # mpc_data=self.control.mpc.data['_p']
+        # self.server.send(mpc_data, topic="/mpc_control")
+        self.server.send(u,topic='/mpc_control')
+
         cmd_msg = Twist()
         cmd_msg.linear.x = u[0]
         cmd_msg.linear.y = u[1]
