@@ -15,9 +15,14 @@ class MPCControlNode(Node):
             self.odom_callback,
             10)
         self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
-        self.control.set_target_point(np.array([0.0, 0.0, 0.0]))  # 设置目标点
+        self.control.set_target_point(np.array([0.0, 10.0, 5.0]))  # 设置目标点
         self.initialized = False
-
+        import asyncio,threading
+        self.loop=asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.thread=threading.Thread(target=self.loop.run_forever,daemon=True)
+        self.thread.start()
+        # asyncio.run_coroutine_threadsafe(test(), self.loop)
     def odom_callback(self, msg: Odometry):
         # 从 Odometry 消息中提取测量值
         measured_x = msg.pose.pose.position.x
@@ -41,14 +46,15 @@ class MPCControlNode(Node):
         # vx = float(u[0][0])
         # vy = float(u[1][0])
         # vw = float(u[2][0])
-        u=self.control.update(x_mpc)
+        import asyncio
+        u=asyncio.run_coroutine_threadsafe(self.control.async_update(x_mpc), self.loop).result()  # 等待结果
+        # u=self.control.update(x_mpc)
         cmd_msg = Twist()
         cmd_msg.linear.x = u[0]
         cmd_msg.linear.y = u[1]
         cmd_msg.angular.z = u[2]
         # 发布控制命令
         self.pub.publish(cmd_msg)
-
 
 def main():
     import rclpy

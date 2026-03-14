@@ -1,9 +1,12 @@
+import warnings
+# 屏蔽所有 UserWarning 警告
+warnings.filterwarnings("ignore", category=UserWarning)
 import do_mpc
 import casadi
 from casadi import vertcat, cos, sin
 import numpy as np
-
-
+from decorder import time_print
+import asyncio
 class MPCModel:
     def __init__(self, dt):
         model_type = 'discrete'
@@ -52,8 +55,15 @@ class MPCModel:
         self.mpc = do_mpc.controller.MPC(self.model)
         self.mpc.set_rterm(u_input=np.array([0.2, 0.2, 0.5])) #直接用数值
         self.mpc.set_objective(mterm=mterm, lterm=lterm)
-        self.mpc.set_param(n_horizon=20, t_step=dt)
-
+        set_up_settings={
+            'n_horizon': 20,
+            't_step': dt,
+            'nlpsol_opts': {
+                'ipopt.print_level': 2,  # 0 关闭 Ipopt 输出 (默认是 5)
+                'print_time': False,     # 关闭 CasADi 的计时输出
+            },
+        }
+        self.mpc.set_param(**set_up_settings)
         # Velocity bounds in body frame.
         self.mpc.bounds['lower', '_u', 'u_input'] = np.array([[-3.0], [-3.0], [-2.0]])
         self.mpc.bounds['upper', '_u', 'u_input'] = np.array([[3.0], [3.0], [2.0]])
@@ -67,17 +77,27 @@ class MPCModel:
 
         self.mpc.set_p_fun(p_fun)
         self.mpc.setup()
+        from concurrent.futures import ProcessPoolExecutor,ThreadPoolExecutor
+        self.pool= ThreadPoolExecutor(max_workers=1)
     def set_state_init(self, x0):
         '''设置 MPC 的初始状态'''
         self.mpc.x0 = x0
         self.mpc.set_initial_guess()
+    @time_print(10)
     def update(self,x):
         assert isinstance(x, np.ndarray) and x.shape ==self.u_vec.shape
         '''根据当前状态 x 计算控制输入'''
         u = self.mpc.make_step(x)
         #u是二维数组，形状为 (3, 1)，我们需要将其转换为一维数组
+        # print(self.mpc.data)
         return u.flatten()
     def set_target_point(self, target:np.ndarray):
         '''设置 MPC 的目标点'''
         assert len(target) == 3
         self.p_template['_p', 0, 'ref'] =target
+    
+    async def async_update(self,x):
+        '''异步版本的 update 方法'''
+        loop = asyncio.get_event_loop()
+        u= await loop.run_in_executor(self.pool, self.update, x)
+        return u
