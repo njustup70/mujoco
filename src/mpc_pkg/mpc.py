@@ -125,7 +125,7 @@ class MPCPathFollower:
         # Input (body frame): [vx, vy, vw]
         self.u_vec = self.model.set_variable(var_type='_u', var_name='u_input', shape=(3, 1))
         # 参数,即参考轨迹点 [x_ref, y_ref, theta_ref]
-        ref = self.model.set_variable(var_type='_p', var_name='ref', shape=(3, 1))
+        ref = self.model.set_variable(var_type='_tvp', var_name='ref', shape=(3, 1))
         
         #定义系统运动学
         theta = self.state[2]
@@ -177,13 +177,13 @@ class MPCPathFollower:
         self.mpc.bounds['upper', '_u', 'u_input'] = np.array([[3.0], [3.0], [2.0]])
 
         # 参数注册
-        p_template=self.mpc.get_p_template(self.n_horizon + 1)
-        assert p_template is not None
-        self.p_template = p_template
-        def p_fun(_t_now: float):
-            return self.p_template
+        tvp_template=self.mpc.get_tvp_template()
+        assert tvp_template is not None
+        self.tvp_template = tvp_template
+        def tvp_fun(_t_now: float):
+            return self.tvp_template
 
-        self.mpc.set_p_fun(p_fun)
+        self.mpc.set_tvp_fun(tvp_fun)
         self.mpc.setup()
         from concurrent.futures import ProcessPoolExecutor,ThreadPoolExecutor
         self.pool= ThreadPoolExecutor(max_workers=1)
@@ -202,11 +202,11 @@ class MPCPathFollower:
 
     def _sample_ref_by_s(self, s_query: float) -> np.ndarray:
         assert self.path_planner is not None
-        # if s_query >= self.path_total_length:
-        #     x_ref = float(self.path_planner.x_path[-1])
-        #     y_ref = float(self.path_planner.y_path[-1])
-        #     yaw_ref = float(self.path_planner.yaw_path[-1])
-        #     return np.array([x_ref, y_ref, yaw_ref])
+        if s_query >= self.path_total_length:
+            x_ref = float(self.path_planner.x_path[-1])
+            y_ref = float(self.path_planner.y_path[-1])
+            yaw_ref = float(self.path_planner.yaw_path[-1])
+            return np.array([x_ref, y_ref, yaw_ref])
 
         # 用真实弧长数组 s_samples 作为插值轴，保证弧长含义正确
         s_samples = self.path_planner.s_samples
@@ -227,13 +227,13 @@ class MPCPathFollower:
             s_k = self.s + self.ref_speed * self.dt * k
             ref_k = self._sample_ref_by_s(s_k)
             foxgloveTools.foxgloveViusalInstance.send(ref_k, topic="/mpc_ref")
-            self.p_template['_p', k, 'ref'] = ref_k
+            self.tvp_template['_tvp', k, 'ref'] = ref_k
             print(ref_k)
     def set_state_init(self, x0):
         '''设置 MPC 的初始状态'''
         self.mpc.x0 = x0
         self.mpc.set_initial_guess()
-    @time_print(10)
+    @time_print(1)
     def update(self,x):
         assert isinstance(x, np.ndarray) and x.shape ==self.u_vec.shape
         '''根据当前状态 x 计算控制输入'''
@@ -246,7 +246,7 @@ class MPCPathFollower:
         '''设置 MPC 的目标点'''
         assert len(target) == 3
         for k in range(self.n_horizon + 1):
-            self.p_template['_p', k, 'ref'] =target
+            self.tvp_template['_tvp', k, 'ref'] =target
     
     async def async_update(self,x):
         '''异步版本的 update 方法'''

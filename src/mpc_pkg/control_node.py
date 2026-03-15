@@ -23,7 +23,7 @@ class MPCControlNode(Node):
         x_pts = [0, 5, 10, 15]
         y_pts = [0, 5, 0, -5]
         self.cube.generate_path(x_pts, y_pts, step_cm=10.0)
-        self.path_follwer.set_path(self.cube, ref_speed=1.0)
+        self.path_follwer.set_path(self.cube, ref_speed=2.0)
         self.initialized = False
         import asyncio,threading
         self.loop=asyncio.new_event_loop()
@@ -53,17 +53,8 @@ class MPCControlNode(Node):
             return
 
         # 新模型下 U 直接是速度 [vx, vy, vw]
-        # u = self.control.mpc.make_step(x_mpc)
-        # vx = float(u[0][0])
-        # vy = float(u[1][0])
-        # vw = float(u[2][0])
         import asyncio
-        # u=asyncio.run_coroutine_threadsafe(self.control.async_update(x_mpc), self.loop).result()  # 等待结果
-        # mpc_data=self.control.mpc.data['_p']
         u=asyncio.run_coroutine_threadsafe(self.path_follwer.async_update(x_mpc), self.loop).result()  # 等待结果
-        # self.server.send(mpc_data, topic="/mpc_control")
-        # self.server.send(u,topic='/mpc_control')
-
         cmd_msg = Twist()
         cmd_msg.linear.x = u[0]
         cmd_msg.linear.y = u[1]
