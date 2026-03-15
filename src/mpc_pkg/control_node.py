@@ -4,7 +4,7 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
 from mpc import MPCModel
 import foxglove
-from mpc_pkg.foxgloveTools import  FoxgloveVisual
+from foxgloveTools import  FoxgloveVisual
 class MPCControlNode(Node):
     def __init__(self):
         super().__init__('mpc_control_node')
@@ -16,7 +16,7 @@ class MPCControlNode(Node):
             self.odom_callback,
             10)
         self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
-        self.control.set_target_point(np.array([0.0, 10.0, 5.0]))  # 设置目标点
+        self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
         self.initialized = False
         import asyncio,threading
         self.loop=asyncio.new_event_loop()
