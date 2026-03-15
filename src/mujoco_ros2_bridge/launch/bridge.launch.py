@@ -18,7 +18,8 @@ def generate_launch_description():
             package='mujoco_ros2_bridge',
             executable='mujoco_node',
             name='mujoco_node',
-            output='screen'
+            output='screen',
+            parameters=[config_file]
         ),
         
         # 2. 启动噪声生成节点

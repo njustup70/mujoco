@@ -21,6 +21,15 @@ class MujocoSimNode(Node):
         # 0. 声明并读取参数
         self.declare_parameter('use_viewer', True)
         self.use_viewer = self.get_parameter('use_viewer').value
+        # 轮子响应误差（模拟真实舵轮：滞后 + 噪声）
+        self.declare_parameter('wheel_steer_noise_std', 0.008)   # 舵角噪声标准差 rad，约 0.46°
+        self.declare_parameter('wheel_drive_noise_std', 0.1)     # 驱动速度噪声标准差 rad/s
+        self.declare_parameter('wheel_steer_lag_alpha', 0.4)     # 舵角跟踪惯性 (0~1)，越小响应越慢
+        self.declare_parameter('wheel_drive_lag_alpha', 0.6)     # 驱动跟踪惯性 (0~1)
+        self.wheel_steer_noise_std = self.get_parameter('wheel_steer_noise_std').value
+        self.wheel_drive_noise_std = self.get_parameter('wheel_drive_noise_std').value
+        self.wheel_steer_lag_alpha = self.get_parameter('wheel_steer_lag_alpha').value
+        self.wheel_drive_lag_alpha = self.get_parameter('wheel_drive_lag_alpha').value
 
         # 1. 加载模型
         try:
@@ -49,6 +58,14 @@ class MujocoSimNode(Node):
         
         self.wheels_pos = [(0.25, 0.2), (0.25, -0.2), (-0.25, 0.2), (-0.25, -0.2)]
         self.last_target_angles = [0.0] * 4
+        # 轮子响应状态（用于一阶滞后）
+        self.last_steer_ctrl = [0.0] * 4   # rad
+        self.last_drive_ctrl = [0.0] * 4  # rad/s
+        # 舵关节在 qpos 中的下标（用于读取当前角并做 2π 归一化，避免 180° 突变抖动）
+        self.steer_qposadr = [
+            self.model.jnt_qposadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, f'wheel{i}_steer')]
+            for i in range(4)
+        ]
 
         # 控制延迟缓冲
         self.reaction_delay_steps = 40 
@@ -105,12 +122,62 @@ class MujocoSimNode(Node):
                 
                 speed = math.sqrt(v_ix**2 + v_iy**2)
                 target_angle = self.last_target_angles[i]
+                signed_speed = speed  # 默认正向
                 if speed > 0.01 or abs(self.smooth_v_yaw) > 0.01:
-                    target_angle = math.degrees(math.atan2(v_iy, v_ix))
+                    desired_deg = math.degrees(math.atan2(v_iy, v_ix))
+                    # 归一化到 [-180, 180]
+                    while desired_deg > 180.0:
+                        desired_deg -= 360.0
+                    while desired_deg < -180.0:
+                        desired_deg += 360.0
+                    # 两种等价表示：(舵角, 正转) 或 (舵角+180°, 反转)，选与上一帧舵角更接近的，前后/左右都避免舵轮转 180°
+                    steer_a = desired_deg
+                    drive_a = speed
+                    steer_b = desired_deg + 180.0
+                    if steer_b > 180.0:
+                        steer_b -= 360.0
+                    drive_b = -speed
+                    last_rad = math.radians(self.last_target_angles[i])
+                    def norm_diff(a_deg, b_rad):
+                        d = math.radians(a_deg) - b_rad
+                        while d > math.pi:
+                            d -= 2.0 * math.pi
+                        while d < -math.pi:
+                            d += 2.0 * math.pi
+                        return abs(d)
+                    if norm_diff(steer_a, last_rad) <= norm_diff(steer_b, last_rad):
+                        target_angle = steer_a
+                        signed_speed = drive_a
+                    else:
+                        target_angle = steer_b
+                        signed_speed = drive_b
                     self.last_target_angles[i] = target_angle
 
-                self.data.actuator(f'steer{i}').ctrl[0] = math.radians(target_angle)
-                self.data.actuator(f'drive{i}').ctrl[0] = speed / wheel_radius
+                # 目标指令
+                target_steer_rad = math.radians(target_angle)
+                target_drive_rads = signed_speed / wheel_radius
+                # 读取当前舵角（hinge 会连续累加，可能超过 ±π），避免目标与当前差 2π 导致位置环突变抖动
+                current_steer = self.data.qpos[self.steer_qposadr[i]]
+                def wrap_to_near(angle, center):
+                    d = angle - center
+                    while d > math.pi:
+                        d -= 2.0 * math.pi
+                    while d < -math.pi:
+                        d += 2.0 * math.pi
+                    return center + d
+                target_steer_rad = wrap_to_near(target_steer_rad, current_steer)
+                self.last_steer_ctrl[i] = wrap_to_near(self.last_steer_ctrl[i], current_steer)
+                # 一阶滞后（模拟电机/舵机响应惯性）
+                self.last_steer_ctrl[i] += self.wheel_steer_lag_alpha * (target_steer_rad - self.last_steer_ctrl[i])
+                self.last_drive_ctrl[i] += self.wheel_drive_lag_alpha * (target_drive_rads - self.last_drive_ctrl[i])
+                # 叠加响应噪声（模拟真实误差），指令仍归一化到当前角附近
+                steer_ctrl = wrap_to_near(
+                    self.last_steer_ctrl[i] + np.random.normal(0.0, self.wheel_steer_noise_std),
+                    current_steer
+                )
+                drive_ctrl = self.last_drive_ctrl[i] + np.random.normal(0.0, self.wheel_drive_noise_std)
+                self.data.actuator(f'steer{i}').ctrl[0] = steer_ctrl
+                self.data.actuator(f'drive{i}').ctrl[0] = drive_ctrl
 
             mujoco.mj_step(self.model, self.data)
             if viewer is not None:

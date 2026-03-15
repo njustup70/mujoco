@@ -1,3 +1,13 @@
+# MuJoCo 仿真节点（含舵轮响应误差）
+mujoco_node:
+  ros__parameters:
+    use_viewer: true
+    # 轮子响应误差（模拟真实舵轮）
+    wheel_steer_noise_std: 0.008   # 舵角噪声标准差 rad，约 0.46°
+    wheel_drive_noise_std: 0.1     # 驱动速度噪声标准差 rad/s
+    wheel_steer_lag_alpha: 0.3    # 舵角跟踪惯性 (0~1)，越小响应越慢
+    wheel_drive_lag_alpha: 0.3    # 驱动跟踪惯性 (0~1)
+
 odom_noise_node:
   ros__parameters:
     # 噪声强度 (单位: 米/弧度/秒)
