@@ -13,11 +13,11 @@ class SplinePlanner:
         # 真实弧长数组，对应每个采样点沿曲线的累计弧长
         self.s_samples = np.array([])
 
-    def find_nearest_point(self, x: float, y: float) -> Tuple[int, float, float, float, float]:
+    def find_nearest_point(self, x: float, y: float) -> Tuple[int, np.ndarray,float]:
         """Find the nearest sampled path point to the query position.
 
         Returns:
-            (index, nearest_x, nearest_y, nearest_yaw, distance)
+            (index, [x,y,yaw], distance)
         """
         if len(self.x_path) == 0:
             raise ValueError("Path is empty. Call generate_path() first.")
@@ -31,12 +31,9 @@ class SplinePlanner:
 
         return (
             idx,
-            float(self.x_path[idx]),
-            float(self.y_path[idx]),
-            float(self.yaw_path[idx]),
-            distance,
-        )
-
+            np.array([float(self.x_path[idx]), float(self.y_path[idx]), float(self.yaw_path[idx])]),
+            distance
+        )   
     def generate_path(
         self, 
         x_pts, 
@@ -107,10 +104,10 @@ class SplinePlanner:
         if len(self.s_samples) == 0:
             raise ValueError("Path is empty. Call generate_path() first.")
         # 先找最近采样点的索引，再查该点的弧长
-        idx, _, _, _, _ = self.find_nearest_point(x, y)
+        idx, _, _ = self.find_nearest_point(x, y)
         return float(self.s_samples[idx])
 
-    def get_state_by_s(self, s_query: float) -> Tuple[float, float, float]:
+    def get_state_by_s(self, s_query: float) -> np.ndarray:
         '''给定弧长 s_query，插值返回对应路径点的 (x, y, yaw)。
         s <= 0 时钳位到起点，s >= 总长时钳位到终点（x/y 不动）。
         '''
@@ -119,12 +116,12 @@ class SplinePlanner:
 
         # 超出起点：直接返回路径起点
         if s_query <= 0.0:
-            return float(self.x_path[0]), float(self.y_path[0]), float(self.yaw_path[0])
+            return np.array([float(self.x_path[0]), float(self.y_path[0]), float(self.yaw_path[0])])
 
         total_length = float(self.s_samples[-1])
         # 超出终点：x/y 保持不动，返回路径终点
         if s_query >= total_length:
-            return float(self.x_path[-1]), float(self.y_path[-1]), float(self.yaw_path[-1])
+            return np.array([float(self.x_path[-1]), float(self.y_path[-1]), float(self.yaw_path[-1])])
 
         # 以真实弧长 s_samples 为插值轴，线性插值 x 和 y
         x_ref = float(np.interp(s_query, self.s_samples, self.x_path))
@@ -133,7 +130,7 @@ class SplinePlanner:
         yaw_unwrapped = float(np.interp(s_query, self.s_samples, self.yaw_path_unwrapped))
         # 将插值结果重新折叠回 (-π, π]
         yaw_ref = float(np.arctan2(np.sin(yaw_unwrapped), np.cos(yaw_unwrapped)))
-        return x_ref, y_ref, yaw_ref
+        return np.array([x_ref, y_ref, yaw_ref])
 
     def plot(self):
         """简单的可视化函数"""

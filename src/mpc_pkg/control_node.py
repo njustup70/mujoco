@@ -22,7 +22,7 @@ class MPCControlNode(Node):
         # 生成一条简单的路径
         target_points = np.array([[0, 0], [7, 5], [7, 10], [15, -10], [20, 5]])
         # self.cube.generate_path(x_pts, y_pts, step_cm=10.0)
-        self.path_follwer.set_path(target_points, target_yaw=0.0, ref_speed=2.0)
+        self.path_follwer.set_path(target_points, target_yaw=2.0, ref_speed=2.0)
         self.initialized = False
         import asyncio,threading
         self.loop=asyncio.new_event_loop()

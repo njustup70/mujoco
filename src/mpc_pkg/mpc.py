@@ -195,7 +195,7 @@ class MPCPathFollower:
         x_pts = target_points[:, 0]
         y_pts = target_points[:, 1]
         self.path_planner.generate_path(x_pts, y_pts, step_cm=10.0)
-        self.tvp_template['_tvp', :, 'ref'][3] = target_yaw
+        self.end_point=np.array([float(x_pts[-1]), float(y_pts[-1]), float(target_yaw)])
         if ref_speed is not None:
             self.ref_speed = float(ref_speed)
     def _update_prediction_reference(self, x: np.ndarray):
@@ -209,11 +209,10 @@ class MPCPathFollower:
             # 插值得到第 k 步的参考点 (x_ref, y_ref, yaw_ref)；超出路径终点后自动钳位
             ref_k= self.path_planner.get_state_by_s(s_k)
             #构造 MPC 需要的参考值格式，并更新到 tvp_template 中
-            ref_k = np.array(ref_k).reshape(3, 1)  # 确保是列向量
             ref_k[2]=self.end_point[2]  #保持角度参考不变，直接使用终点的角度参考
             #只更改位置参考，保持角度参考不变
             self.tvp_template['_tvp', k, 'ref'] =ref_k 
-            print(ref_k)
+            # print(ref_k)
     def set_state_init(self, x0):
         '''设置 MPC 的初始状态'''
         self.mpc.x0 = x0
