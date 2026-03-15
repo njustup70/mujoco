@@ -2,9 +2,9 @@ import numpy as np
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
-from mpc import MPCModel
-import foxglove
-from foxgloveTools import  FoxgloveVisual
+import linear
+from mpc import MPCModel,MPCPathFollower
+import foxgloveTools
 class MPCControlNode(Node):
     def __init__(self):
         super().__init__('mpc_control_node')
@@ -16,7 +16,14 @@ class MPCControlNode(Node):
             self.odom_callback,
             10)
         self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
-        self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
+        # self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
+        self.path_follwer=MPCPathFollower(0.1)
+        self.cube=linear.SplinePlanner()
+        # 生成一条简单的路径
+        x_pts = [0, 5, 10, 15]
+        y_pts = [0, 5, 0, -5]
+        self.cube.generate_path(x_pts, y_pts, step_cm=10.0)
+        self.path_follwer.set_path(self.cube, ref_speed=1.0)
         self.initialized = False
         import asyncio,threading
         self.loop=asyncio.new_event_loop()
@@ -25,7 +32,7 @@ class MPCControlNode(Node):
         self.thread.start()
         # asyncio.run_coroutine_threadsafe(test(), self.loop)
         # self.server=foxglove.start_server(port=8766)
-        self.server=FoxgloveVisual(port=8766)
+        
     def odom_callback(self, msg: Odometry):
         # 从 Odometry 消息中提取测量值
         measured_x = msg.pose.pose.position.x
@@ -41,6 +48,7 @@ class MPCControlNode(Node):
         if not self.initialized:
             self.control.mpc.x0 = x_mpc
             self.control.mpc.set_initial_guess()
+            self.path_follwer.set_state_init(x_mpc)
             self.initialized = True
             return
 
@@ -50,10 +58,11 @@ class MPCControlNode(Node):
         # vy = float(u[1][0])
         # vw = float(u[2][0])
         import asyncio
-        u=asyncio.run_coroutine_threadsafe(self.control.async_update(x_mpc), self.loop).result()  # 等待结果
+        # u=asyncio.run_coroutine_threadsafe(self.control.async_update(x_mpc), self.loop).result()  # 等待结果
         # mpc_data=self.control.mpc.data['_p']
+        u=asyncio.run_coroutine_threadsafe(self.path_follwer.async_update(x_mpc), self.loop).result()  # 等待结果
         # self.server.send(mpc_data, topic="/mpc_control")
-        self.server.send(u,topic='/mpc_control')
+        # self.server.send(u,topic='/mpc_control')
 
         cmd_msg = Twist()
         cmd_msg.linear.x = u[0]
