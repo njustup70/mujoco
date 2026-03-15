@@ -8,6 +8,7 @@ class SplinePlanner:
         self.x_path = np.array([])
         self.y_path = np.array([])
         self.yaw_path = np.array([])
+        self.yaw_path_unwrapped = np.array([])
         self.t_samples = np.array([])
         # 真实弧长数组，对应每个采样点沿曲线的累计弧长
         self.s_samples = np.array([])
@@ -79,7 +80,7 @@ class SplinePlanner:
         # 使用 linspace 保证从 0 正好到终点，且间距几乎恒定为 step_m
         self.t_samples = np.linspace(0, total_length, num_samples)
         
-        # 4. 插值采样
+        # 4. 插值采样 
         self.x_path = cs_x(self.t_samples)
         self.y_path = cs_y(self.t_samples)
         
@@ -87,12 +88,52 @@ class SplinePlanner:
         dx = cs_x(self.t_samples, 1)        
         dy = cs_y(self.t_samples, 1)
         self.yaw_path = np.arctan2(dy, dx)
+        self.yaw_path_unwrapped = np.unwrap(self.yaw_path)
 
         # 6. 计算各采样点的真实弧长（相邻采样点间欧氏距离累积）
         ds_path = np.sqrt(np.diff(self.x_path)**2 + np.diff(self.y_path)**2)
         self.s_samples = np.concatenate(([0.0], np.cumsum(ds_path)))
 
         return self.x_path, self.y_path, self.yaw_path
+
+    def get_total_length(self) -> float:
+        '''返回路径的真实总弧长（单位：米）'''
+        if len(self.s_samples) == 0:
+            raise ValueError("Path is empty. Call generate_path() first.")
+        return float(self.s_samples[-1])
+
+    def get_nearest_s(self, x: float, y: float) -> float:
+        '''给定世界坐标 (x, y)，返回路径上距离最近点对应的弧长 s'''
+        if len(self.s_samples) == 0:
+            raise ValueError("Path is empty. Call generate_path() first.")
+        # 先找最近采样点的索引，再查该点的弧长
+        idx, _, _, _, _ = self.find_nearest_point(x, y)
+        return float(self.s_samples[idx])
+
+    def get_state_by_s(self, s_query: float) -> Tuple[float, float, float]:
+        '''给定弧长 s_query，插值返回对应路径点的 (x, y, yaw)。
+        s <= 0 时钳位到起点，s >= 总长时钳位到终点（x/y 不动）。
+        '''
+        if len(self.s_samples) == 0:
+            raise ValueError("Path is empty. Call generate_path() first.")
+
+        # 超出起点：直接返回路径起点
+        if s_query <= 0.0:
+            return float(self.x_path[0]), float(self.y_path[0]), float(self.yaw_path[0])
+
+        total_length = float(self.s_samples[-1])
+        # 超出终点：x/y 保持不动，返回路径终点
+        if s_query >= total_length:
+            return float(self.x_path[-1]), float(self.y_path[-1]), float(self.yaw_path[-1])
+
+        # 以真实弧长 s_samples 为插值轴，线性插值 x 和 y
+        x_ref = float(np.interp(s_query, self.s_samples, self.x_path))
+        y_ref = float(np.interp(s_query, self.s_samples, self.y_path))
+        # yaw 使用解卷绕后的连续角度插值，避免 ±π 附近的跳变
+        yaw_unwrapped = float(np.interp(s_query, self.s_samples, self.yaw_path_unwrapped))
+        # 将插值结果重新折叠回 (-π, π]
+        yaw_ref = float(np.arctan2(np.sin(yaw_unwrapped), np.cos(yaw_unwrapped)))
+        return x_ref, y_ref, yaw_ref
 
     def plot(self):
         """简单的可视化函数"""

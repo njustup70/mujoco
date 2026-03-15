@@ -116,9 +116,10 @@ class MPCPathFollower:
         self.n_horizon = 20
         self.s = 0.0
         self.ref_speed = 0.5
-        self.path_planner = None
-        self.path_total_length = 0.0
-
+        self.path_planner = SplinePlanner()
+        self.is_following_path = False
+        #终点
+        self.end_point=np.array([0.0, 0.0, 0.0])
         # State: [x, y, theta]
         #self.state= mpc.x['state'] 等价写法
         self.state = self.model.set_variable(var_type='_x', var_name='state', shape=(3, 1))
@@ -151,7 +152,7 @@ class MPCPathFollower:
         angle_diff = self.state[2] - ref[2]
         wrapped_angle_diff = casadi.atan2(casadi.sin(angle_diff), casadi.cos(angle_diff))
 
-
+        
         # 直接使用平方误差
         yaw_err = casadi.sumsqr(wrapped_angle_diff)
         #结束代价，符号函数
@@ -188,52 +189,36 @@ class MPCPathFollower:
         from concurrent.futures import ProcessPoolExecutor,ThreadPoolExecutor
         self.pool= ThreadPoolExecutor(max_workers=1)
 
-    def set_path(self, planner: SplinePlanner, ref_speed=None):
-        if len(planner.s_samples) == 0 or len(planner.x_path) == 0 or len(planner.y_path) == 0:
-            raise ValueError('Path planner has no sampled path, call generate_path() first.')
-        self.path_planner = planner
-        # 使用真实弧长数组的终点值作为路径总长
-        self.path_total_length = float(planner.s_samples[-1])
+    def set_path(self,target_points: np.ndarray,target_yaw: float, ref_speed=None):
+        self.is_following_path = True
+        #传入的target_points是一个二维数组，形状为 (N, 2)，每行是一个路径点的 (x, y) 坐标
+        x_pts = target_points[:, 0]
+        y_pts = target_points[:, 1]
+        self.path_planner.generate_path(x_pts, y_pts, step_cm=10.0)
+        self.tvp_template['_tvp', :, 'ref'][3] = target_yaw
         if ref_speed is not None:
             self.ref_speed = float(ref_speed)
-
-    def set_reference_speed(self, ref_speed: float):
-        self.ref_speed = float(ref_speed)
-
-    def _sample_ref_by_s(self, s_query: float) -> np.ndarray:
-        assert self.path_planner is not None
-        if s_query >= self.path_total_length:
-            x_ref = float(self.path_planner.x_path[-1])
-            y_ref = float(self.path_planner.y_path[-1])
-            yaw_ref = float(self.path_planner.yaw_path[-1])
-            return np.array([x_ref, y_ref, yaw_ref])
-
-        # 用真实弧长数组 s_samples 作为插值轴，保证弧长含义正确
-        s_samples = self.path_planner.s_samples
-        x_ref = float(np.interp(s_query, s_samples, self.path_planner.x_path))
-        y_ref = float(np.interp(s_query, s_samples, self.path_planner.y_path))
-        yaw_ref = float(np.interp(s_query, s_samples, self.path_planner.yaw_path))
-        return np.array([x_ref, y_ref, yaw_ref])
-
     def _update_prediction_reference(self, x: np.ndarray):
-        if self.path_planner is None:
+        if self.is_following_path==False:
             return
-
-        idx, _, _, _, _ = self.path_planner.find_nearest_point(float(x[0, 0]), float(x[1, 0]))
-        # 用真实弧长数组获取当前位置对应的弧长
-        self.s = float(self.path_planner.s_samples[idx])
-
+        # 根据当前位置找到路径上最近点，得到对应的虚拟弧长 s
+        self.s = self.path_planner.get_nearest_s(float(x[0, 0]), float(x[1, 0]))
+        # 在预测域内，s 按参考速度逐步向前推进，每步推进 ref_speed * dt
         for k in range(self.n_horizon + 1):
             s_k = self.s + self.ref_speed * self.dt * k
-            ref_k = self._sample_ref_by_s(s_k)
-            foxgloveTools.foxgloveViusalInstance.send(ref_k, topic="/mpc_ref")
-            self.tvp_template['_tvp', k, 'ref'] = ref_k
+            # 插值得到第 k 步的参考点 (x_ref, y_ref, yaw_ref)；超出路径终点后自动钳位
+            ref_k= self.path_planner.get_state_by_s(s_k)
+            #构造 MPC 需要的参考值格式，并更新到 tvp_template 中
+            ref_k = np.array(ref_k).reshape(3, 1)  # 确保是列向量
+            ref_k[2]=self.end_point[2]  #保持角度参考不变，直接使用终点的角度参考
+            #只更改位置参考，保持角度参考不变
+            self.tvp_template['_tvp', k, 'ref'] =ref_k 
             print(ref_k)
     def set_state_init(self, x0):
         '''设置 MPC 的初始状态'''
         self.mpc.x0 = x0
         self.mpc.set_initial_guess()
-    @time_print(1)
+    @time_print(10)
     def update(self,x):
         assert isinstance(x, np.ndarray) and x.shape ==self.u_vec.shape
         '''根据当前状态 x 计算控制输入'''
@@ -245,9 +230,10 @@ class MPCPathFollower:
     def set_target_point(self, target:np.ndarray):
         '''设置 MPC 的目标点'''
         assert len(target) == 3
+        self.is_following_path= False
+        self.end_point=target
         for k in range(self.n_horizon + 1):
-            self.tvp_template['_tvp', k, 'ref'] =target
-    
+            self.tvp_template['_tvp', k, 'ref'] = target
     async def async_update(self,x):
         '''异步版本的 update 方法'''
         loop = asyncio.get_event_loop()
