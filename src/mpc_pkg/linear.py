@@ -1,64 +1,106 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.interpolate import CubicSpline
+from typing import Optional, Tuple, List
 
-def get_spline_path_with_yaw(x_points, y_points, start_yaw, end_yaw, num_samples=100):
-    # 1. 计算参数 t (累计弧长)
-    dx = np.diff(x_points)
-    dy = np.diff(y_points)
-    ds = np.sqrt(dx**2 + dy**2)
-    t = np.concatenate(([0], np.cumsum(ds)))
-    
-    # 2. 定义起始和结束的一阶导数 (速度矢量)
-    # 我们假设单位速度，或者根据相邻点距离调整以获得更自然的过渡
-    v_start:tuple[float, float] = (np.cos(start_yaw), np.sin(start_yaw))
-    v_end:tuple[float, float] = (np.cos(end_yaw), np.sin(end_yaw))
+class SplinePlanner:
+    def __init__(self):
+        self.x_path = np.array([])
+        self.y_path = np.array([])
+        self.yaw_path = np.array([])
+        self.t_samples = np.array([])
 
-    # 3. 建立三次样条插值函数
-    # bc_type=((1, val_start), (1, val_end)) 表示指定一阶导数
-    from typing import Any, cast
-    bc_type=cast(Any, ((1, v_start[0]), (1, v_end[0])))
-    cs_x = CubicSpline(t, x_points, bc_type=bc_type)
-    cs_y = CubicSpline(t, y_points, bc_type=bc_type)
+    def generate_path(
+        self, 
+        x_pts, 
+        y_pts, 
+        start_yaw: Optional[float] = None, 
+        end_yaw: Optional[float] = None, 
+        num_samples: int = 100
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        生成三次样条平滑路径
+        :param x_pts: 控制点 X 列表
+        :param y_pts: 控制点 Y 列表
+        :param start_yaw: 起点航向角 (弧度), None 则自动计算
+        :param end_yaw: 终点航向角 (弧度), None 则自动计算
+        :param num_samples: 采样点数
+        """
+        x_pts = np.array(x_pts)
+        y_pts = np.array(y_pts)
+        
+        # 1. 计算参数 t (基于累计弦长)
+        ds = np.sqrt(np.diff(x_pts)**2 + np.diff(y_pts)**2)
+        t_pts = np.concatenate(([0], np.cumsum(ds)))
+        
+        # 2. 确定边界条件 (bc_type)
+        # 如果不指定 yaw，使用 'not-a-knot' (默认)；如果指定，使用一阶导数约束
+        bc_x = 'not-a-knot'
+        bc_y = 'not-a-knot'
+        
+        # 这里的 scale 决定了“出弯/入弯”的力度，通常设为 1.0 或相邻两点间距
+        v_scale = ds[0] if len(ds) > 0 else 1.0 
 
-    # 4. 生成采样
-    t_fine = np.linspace(0, t[-1], num_samples)
-    x_fine = cs_x(t_fine)
-    y_fine = cs_y(t_fine)
-    
-    # 5. 计算 Yaw
-    dx_dt = cs_x(t_fine, 1)
-    dy_dt = cs_y(t_fine, 1)
-    yaw = np.arctan2(dy_dt, dx_dt)
-    
-    return x_fine, y_fine, yaw
-def test():
+        if start_yaw is not None and end_yaw is not None:
+            v_start = (v_scale * np.cos(start_yaw), v_scale * np.sin(start_yaw))
+            v_end = (v_scale * np.cos(end_yaw), v_scale * np.sin(end_yaw))
+            bc_x = ((1, v_start[0]), (1, v_end[0]))
+            bc_y = ((1, v_start[1]), (1, v_end[1]))
+        elif start_yaw is not None:
+            v_start = (v_scale * np.cos(start_yaw), v_scale * np.sin(start_yaw))
+            bc_x = ((1, v_start[0]), (2, 0.0)) # 起点一阶导，终点二阶导为0
+            bc_y = ((1, v_start[1]), (2, 0.0))
+        
+        # 3. 拟合样条
+        cs_x = CubicSpline(t_pts, x_pts, bc_type=bc_x) # type: ignore
+        cs_y = CubicSpline(t_pts, y_pts, bc_type=bc_y) # type: ignore
 
-    # --- 测试 ---
-    # x_pts = [0, 2, 4, 3, 6]
-    # y_pts = [0, 1, 5, 8, 9]
-    x_pts=[0,0.5]
-    y_pts=[0,0.5]
-    # 设定起始 Yaw 为 0° (向右), 终点 Yaw 为 180° (向左)
-    s_yaw = 0.0
-    e_yaw = np.pi 
+        # 4. 插值采样
+        self.t_samples = np.linspace(0, t_pts[-1], num_samples)
+        self.x_path = cs_x(self.t_samples)
+        self.y_path = cs_y(self.t_samples)
+        
+        # 5. 计算 Yaw 角
+        dx = cs_x(self.t_samples, 1)        
+        dy = cs_y(self.t_samples, 1)
+        self.yaw_path = np.arctan2(dy, dx)
+        
+        return self.x_path, self.y_path, self.yaw_path
 
-    x_new, y_new, yaw_new = get_spline_path_with_yaw(x_pts, y_pts, s_yaw, e_yaw, num_samples=200)
+    def plot(self):
+        """简单的可视化函数"""
+        if len(self.x_path) == 0:
+            print("No path to plot.")
+            return
+        
+        plt.figure(figsize=(8, 8))
+        plt.plot(self.x_path, self.y_path, 'b-', label="Spline Path")
+        plt.quiver(self.x_path[::10], self.y_path[::10], 
+                   np.cos(self.yaw_path[::10]), np.sin(self.yaw_path[::10]), 
+                   color='green', scale=20, width=0.005)
+        plt.axis("equal")
+        plt.grid(True)
+        plt.legend()
+        plt.show()
 
-    # 可视化
-    plt.figure(figsize=(10, 6))
-    plt.plot(x_pts, y_pts, 'ro', label='Control Points')
-    plt.plot(x_new, y_new, 'b-', label='Clamped Spline')
-    # 绘制方向箭头
-    plt.quiver(x_new[::10], y_new[::10], np.cos(yaw_new[::10]), np.sin(yaw_new[::10]), 
-            scale=15, color='green', alpha=0.6)
-    # 突出显示起终点方向
-    plt.arrow(x_new[0], y_new[0], np.cos(s_yaw), np.sin(s_yaw), color='orange', width=0.1, label='Start Goal Yaw')
-    plt.arrow(x_new[-1], y_new[-1], np.cos(e_yaw), np.sin(e_yaw), color='orange', width=0.1)
+# --- 调用示例 ---
+if __name__ == "__main__":
+    planner = SplinePlanner()
 
-    plt.legend()
-    plt.axis('equal')
-    plt.grid(True)
-    plt.show()
-if __name__ == '__main__':
-    test()
+    # 情况 1: 指定起终点 Yaw (强制掉头)
+    print("Generating path with yaw constraints...")
+    x1, y1, yaw1 = planner.generate_path(
+        x_pts=[0, 2, 4], 
+        y_pts=[0, 1, 0], 
+        start_yaw=0.0,           # 水平向右出发
+        end_yaw=np.deg2rad(180)  # 水平向左结束
+    )
+    planner.plot()
+
+    # 情况 2: 不指定 Yaw (自由平滑插值)
+    print("Generating free path...")
+    x2, y2, yaw2 = planner.generate_path(
+        x_pts=[0, 1, 3, 5], 
+        y_pts=[0, 2, 1, 3]
+    )
+    planner.plot()
