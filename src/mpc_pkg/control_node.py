@@ -1,95 +1,118 @@
 import numpy as np
 from rclpy.node import Node
-from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Twist
-from mpc import ExtendedMPCModel
-
+from nav_msgs.msg import Odometry, Path
+from geometry_msgs.msg import Twist, PoseStamped
+import linear
+from mpc import MPCModel,MPCPathFollower
+import foxgloveTools
 class MPCControlNode(Node):
     def __init__(self):
         super().__init__('mpc_control_node')
         self.dt = 0.1
-        self.control = ExtendedMPCModel(dt=self.dt)
+        self.control = MPCModel(dt=self.dt)
         self.subscription = self.create_subscription(
             Odometry,
             'odom',
             self.odom_callback,
             10)
         self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
-        self.control.set_target_point(np.array([0.0, 10.0, 5.0]))  # 设置目标点
+        self.ref_path_pub = self.create_publisher(Path, '/mpc/reference_path', 10)
+        self.tracked_path_pub = self.create_publisher(Path, '/mpc/tracked_path', 10)
+        self.frame_id = 'odom'
+        self.max_tracked_points = 2000
+        self.ref_path_msg = Path()
+        self.ref_path_msg.header.frame_id = self.frame_id
+        self.tracked_path_msg = Path()
+        self.tracked_path_msg.header.frame_id = self.frame_id
+        # self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
+        self.path_follwer=MPCPathFollower(0.1)
+        self.cube=linear.SplinePlanner()
+        # 生成一条简单的路径
+        target_points = np.array([[0, 0], [7, 5], [7, 10], [15, -10], [20, 5]])
+        # self.cube.generate_path(x_pts, y_pts, step_cm=10.0)
+        self.path_follwer.set_path(target_points, target_yaw=2.0, ref_speed=2.0)
+        self._publish_reference_path_once()
+        self.ref_path_timer = self.create_timer(0.5, self._publish_reference_path_once)
         self.initialized = False
-        # 缓存上一拍控制量（速度），避免 MPC 求解慢或失败时 cmd_vel 出现 0 或断流
-        self.last_u = np.array([0.0, 0.0, 0.0])  # [V, alpha, omega]
-        self.last_u_lock = None  # 可选：用 threading.Lock 若多线程写 last_u
-        # 目标死区：进入后发 0 并视为到达，解决终点难以收敛/抖动
-        self.declare_parameter('goal_dist_thresh', 0.02)
-        self.declare_parameter('goal_yaw_thresh_rad', 0.02)
-        self.goal_dist_thresh = self.get_parameter('goal_dist_thresh').value
-        self.goal_yaw_thresh = self.get_parameter('goal_yaw_thresh_rad').value
-        # 固定频率发布 cmd_vel（如 50Hz），用 last_u 填充，避免因 MPC 延迟导致话题“断流”被底盘当成 0
-        self.cmd_publish_timer = self.create_timer(0.02, self.cmd_publish_callback)  # 50Hz
-        import asyncio
-        import threading
-        self.loop = asyncio.new_event_loop()
+        import asyncio,threading
+        self.loop=asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
-        self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+        self.thread=threading.Thread(target=self.loop.run_forever,daemon=True)
         self.thread.start()
+        # asyncio.run_coroutine_threadsafe(test(), self.loop)
+        # self.server=foxglove.start_server(port=8766)
 
-    def _goal_reached(self, x_mpc: np.ndarray) -> bool:
-        """检查是否到达目标点（只依赖前 3 维：x, y, theta）"""
-        ref = np.array(self.control.p_template['_p', 0, 'ref']).flatten()
-        dist = np.hypot(x_mpc[0, 0] - ref[0], x_mpc[1, 0] - ref[1])
-        yaw_err = abs(np.arctan2(np.sin(x_mpc[2, 0] - ref[2]), np.cos(x_mpc[2, 0] - ref[2])))
-        return dist < self.goal_dist_thresh and yaw_err < self.goal_yaw_thresh
+    def _yaw_to_quaternion(self, yaw: float):
+        qz = float(np.sin(yaw * 0.5))
+        qw = float(np.cos(yaw * 0.5))
+        return qz, qw
 
-    def cmd_publish_callback(self):
-        """固定频率发布 cmd_vel，MPC 直接输出速度"""
-        # MPC 输出直接是速度 [V, alpha, omega]
-        V = self.last_u[0]
-        alpha = self.last_u[1]
-        omega = self.last_u[2]
+    def _make_pose_stamped(self, x: float, y: float, yaw: float, stamp):
+        pose = PoseStamped()
+        pose.header.frame_id = self.frame_id
+        pose.header.stamp = stamp
+        pose.pose.position.x = float(x)
+        pose.pose.position.y = float(y)
+        pose.pose.position.z = 0.0
+        qz, qw = self._yaw_to_quaternion(yaw)
+        pose.pose.orientation.x = 0.0
+        pose.pose.orientation.y = 0.0
+        pose.pose.orientation.z = qz
+        pose.pose.orientation.w = qw
+        return pose
+
+    def _publish_reference_path_once(self):
+        planner = self.path_follwer.path_planner
+        if len(planner.x_path) == 0:
+            return
+
+        stamp = self.get_clock().now().to_msg()
+        self.ref_path_msg.header.stamp = stamp
+        poses = []
+        for x, y, yaw in zip(planner.x_path, planner.y_path, planner.yaw_path):
+            poses.append(self._make_pose_stamped(x, y, yaw, stamp))
+        self.ref_path_msg.poses = poses
+        self.ref_path_pub.publish(self.ref_path_msg)
+
+    def _append_tracked_pose(self, measured_x: float, measured_y: float, measured_theta: float):
+        stamp = self.get_clock().now().to_msg()
+        self.tracked_path_msg.header.stamp = stamp
+        poses = list(self.tracked_path_msg.poses)
+        poses.append(self._make_pose_stamped(measured_x, measured_y, measured_theta, stamp))
+        if len(poses) > self.max_tracked_points:
+            poses = poses[-self.max_tracked_points:]
+        self.tracked_path_msg.poses = poses
+        self.tracked_path_pub.publish(self.tracked_path_msg)
         
-        # 转换为身体坐标系速度
-        vx_body = V * np.cos(alpha)
-        vy_body = V * np.sin(alpha)
-        
-        cmd_msg = Twist()
-        cmd_msg.linear.x = float(vx_body)
-        cmd_msg.linear.y = float(vy_body)
-        cmd_msg.angular.z = float(omega)
-        self.pub.publish(cmd_msg)
-
     def odom_callback(self, msg: Odometry):
-        # 一旦到达目标，就不再处理任何 odom 更新（忽略后续的噪声）
+        # 从 Odometry 消息中提取测量值
         measured_x = msg.pose.pose.position.x
         measured_y = msg.pose.pose.position.y
+        # 从四元数提取 Yaw 角
         q = msg.pose.pose.orientation
         siny_cosp = 2 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
         measured_theta = np.arctan2(siny_cosp, cosy_cosp)
-        
-        # 构建 3 维状态向量 [x, y, theta]
+        self._append_tracked_pose(measured_x, measured_y, measured_theta)
+
         x_mpc = np.array([[measured_x], [measured_y], [measured_theta]])
 
         if not self.initialized:
-            self.control.set_state_init(x_mpc)
+            self.control.mpc.x0 = x_mpc
+            self.control.mpc.set_initial_guess()
+            self.path_follwer.set_state_init(x_mpc)
             self.initialized = True
             return
 
-        # 进入目标死区则发 0，**并上锁**，后续不再启动 MPC
-        if self._goal_reached(x_mpc):
-            self.last_u = np.array([0.0, 0.0, 0.0])
-            return
-
+        # 新模型下 U 直接是速度 [vx, vy, vw]
         import asyncio
-        future = asyncio.run_coroutine_threadsafe(self.control.async_update(x_mpc), self.loop)
-        try:
-            u = future.result(timeout=self.dt * 2.0)  # 略大于一步周期，避免无限等
-        except Exception:
-            # 求解超时或异常时保留上一拍控制，不置 0
-            return
-        u = np.asarray(u).flatten()
-        if u.size >= 3:
-            self.last_u = u
+        u=asyncio.run_coroutine_threadsafe(self.path_follwer.async_update(x_mpc), self.loop).result()  # 等待结果
+        cmd_msg = Twist()
+        cmd_msg.linear.x = u[0]
+        cmd_msg.linear.y = u[1]
+        cmd_msg.angular.z = u[2]
+        # 发布控制命令
+        self.pub.publish(cmd_msg)
 
 def main():
     import rclpy

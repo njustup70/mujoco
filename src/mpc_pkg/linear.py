@@ -1,64 +1,171 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.interpolate import CubicSpline
+from typing import Optional, Tuple, List
 
-def get_spline_path_with_yaw(x_points, y_points, start_yaw, end_yaw, num_samples=100):
-    # 1. 计算参数 t (累计弧长)
-    dx = np.diff(x_points)
-    dy = np.diff(y_points)
-    ds = np.sqrt(dx**2 + dy**2)
-    t = np.concatenate(([0], np.cumsum(ds)))
-    
-    # 2. 定义起始和结束的一阶导数 (速度矢量)
-    # 我们假设单位速度，或者根据相邻点距离调整以获得更自然的过渡
-    v_start:tuple[float, float] = (np.cos(start_yaw), np.sin(start_yaw))
-    v_end:tuple[float, float] = (np.cos(end_yaw), np.sin(end_yaw))
+class SplinePlanner:
+    def __init__(self):
+        self.x_path = np.array([])
+        self.y_path = np.array([])
+        self.yaw_path = np.array([])
+        self.yaw_path_unwrapped = np.array([])
+        self.t_samples = np.array([])
+        # 真实弧长数组，对应每个采样点沿曲线的累计弧长
+        self.s_samples = np.array([])
 
-    # 3. 建立三次样条插值函数
-    # bc_type=((1, val_start), (1, val_end)) 表示指定一阶导数
-    from typing import Any, cast
-    bc_type=cast(Any, ((1, v_start[0]), (1, v_end[0])))
-    cs_x = CubicSpline(t, x_points, bc_type=bc_type)
-    cs_y = CubicSpline(t, y_points, bc_type=bc_type)
+    def find_nearest_point(self, x: float, y: float) -> Tuple[int, np.ndarray,float]:
+        """Find the nearest sampled path point to the query position.
 
-    # 4. 生成采样
-    t_fine = np.linspace(0, t[-1], num_samples)
-    x_fine = cs_x(t_fine)
-    y_fine = cs_y(t_fine)
-    
-    # 5. 计算 Yaw
-    dx_dt = cs_x(t_fine, 1)
-    dy_dt = cs_y(t_fine, 1)
-    yaw = np.arctan2(dy_dt, dx_dt)
-    
-    return x_fine, y_fine, yaw
-def test():
+        Returns:
+            (index, [x,y,yaw], distance)
+        """
+        if len(self.x_path) == 0:
+            raise ValueError("Path is empty. Call generate_path() first.")
 
-    # --- 测试 ---
-    # x_pts = [0, 2, 4, 3, 6]
-    # y_pts = [0, 1, 5, 8, 9]
-    x_pts=[0,0.5]
-    y_pts=[0,0.5]
-    # 设定起始 Yaw 为 0° (向右), 终点 Yaw 为 180° (向左)
-    s_yaw = 0.0
-    e_yaw = np.pi 
+        dx = self.x_path - x
+        dy = self.y_path - y
+        dist_sq = dx * dx + dy * dy
 
-    x_new, y_new, yaw_new = get_spline_path_with_yaw(x_pts, y_pts, s_yaw, e_yaw, num_samples=200)
+        idx = int(np.argmin(dist_sq))
+        distance = float(np.sqrt(dist_sq[idx]))
 
-    # 可视化
-    plt.figure(figsize=(10, 6))
-    plt.plot(x_pts, y_pts, 'ro', label='Control Points')
-    plt.plot(x_new, y_new, 'b-', label='Clamped Spline')
-    # 绘制方向箭头
-    plt.quiver(x_new[::10], y_new[::10], np.cos(yaw_new[::10]), np.sin(yaw_new[::10]), 
-            scale=15, color='green', alpha=0.6)
-    # 突出显示起终点方向
-    plt.arrow(x_new[0], y_new[0], np.cos(s_yaw), np.sin(s_yaw), color='orange', width=0.1, label='Start Goal Yaw')
-    plt.arrow(x_new[-1], y_new[-1], np.cos(e_yaw), np.sin(e_yaw), color='orange', width=0.1)
+        return (
+            idx,
+            np.array([float(self.x_path[idx]), float(self.y_path[idx]), float(self.yaw_path[idx])]),
+            distance
+        )   
+    def generate_path(
+        self, 
+        x_pts, 
+        y_pts, 
+        start_yaw: Optional[float] = None, 
+        end_yaw: Optional[float] = None, 
+        step_cm: float = 5.0  # 新增参数：固定间距（单位：厘米）
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        
+        x_pts = np.array(x_pts)
+        y_pts = np.array(y_pts)
+        
+        # 1. 计算参数 t (累计弦长)
+        ds = np.sqrt(np.diff(x_pts)**2 + np.diff(y_pts)**2)
+        t_pts = np.concatenate(([0], np.cumsum(ds)))
+        
+        # 2. 确定边界条件 (保持原有逻辑)
+        bc_x, bc_y = 'not-a-knot', 'not-a-knot'
+        v_scale = ds[0] if len(ds) > 0 else 1.0 
 
-    plt.legend()
-    plt.axis('equal')
-    plt.grid(True)
-    plt.show()
-if __name__ == '__main__':
-    test()
+        if start_yaw is not None and end_yaw is not None:
+            v_start = (v_scale * np.cos(start_yaw), v_scale * np.sin(start_yaw))
+            v_end = (v_scale * np.cos(end_yaw), v_scale * np.sin(end_yaw))
+            bc_x = ((1, v_start[0]), (1, v_end[0]))
+            bc_y = ((1, v_start[1]), (1, v_end[1]))
+        elif start_yaw is not None:
+            v_start = (v_scale * np.cos(start_yaw), v_scale * np.sin(start_yaw))
+            bc_x = ((1, v_start[0]), (2, 0.0))
+            bc_y = ((1, v_start[1]), (2, 0.0))
+        
+        # 3. 拟合样条
+        cs_x = CubicSpline(t_pts, x_pts, bc_type=bc_x) # type: ignore
+        cs_y = CubicSpline(t_pts, y_pts, bc_type=bc_y) # type: ignore
+
+        # --- 核心修改部分：固定间距采样 ---
+        total_length = t_pts[-1]           # 路径总长度（米）
+        step_m = step_cm / 100.0           # 将厘米转换为米
+        
+        # 计算采样点数，确保覆盖终点
+        num_samples = int(np.floor(total_length / step_m)) + 1
+        # 使用 linspace 保证从 0 正好到终点，且间距几乎恒定为 step_m
+        self.t_samples = np.linspace(0, total_length, num_samples)
+        
+        # 4. 插值采样 
+        self.x_path = cs_x(self.t_samples)
+        self.y_path = cs_y(self.t_samples)
+        
+        # 5. 计算 Yaw 角
+        dx = cs_x(self.t_samples, 1)        
+        dy = cs_y(self.t_samples, 1)
+        self.yaw_path = np.arctan2(dy, dx)
+        self.yaw_path_unwrapped = np.unwrap(self.yaw_path)
+
+        # 6. 计算各采样点的真实弧长（相邻采样点间欧氏距离累积）
+        ds_path = np.sqrt(np.diff(self.x_path)**2 + np.diff(self.y_path)**2)
+        self.s_samples = np.concatenate(([0.0], np.cumsum(ds_path)))
+
+        return self.x_path, self.y_path, self.yaw_path
+
+    def get_total_length(self) -> float:
+        '''返回路径的真实总弧长（单位：米）'''
+        if len(self.s_samples) == 0:
+            raise ValueError("Path is empty. Call generate_path() first.")
+        return float(self.s_samples[-1])
+
+    def get_nearest_s(self, x: float, y: float) -> float:
+        '''给定世界坐标 (x, y)，返回路径上距离最近点对应的弧长 s'''
+        if len(self.s_samples) == 0:
+            raise ValueError("Path is empty. Call generate_path() first.")
+        # 先找最近采样点的索引，再查该点的弧长
+        idx, _, _ = self.find_nearest_point(x, y)
+        return float(self.s_samples[idx])
+
+    def get_state_by_s(self, s_query: float) -> np.ndarray:
+        '''给定弧长 s_query，插值返回对应路径点的 (x, y, yaw)。
+        s <= 0 时钳位到起点，s >= 总长时钳位到终点（x/y 不动）。
+        '''
+        if len(self.s_samples) == 0:
+            raise ValueError("Path is empty. Call generate_path() first.")
+
+        # 超出起点：直接返回路径起点
+        if s_query <= 0.0:
+            return np.array([float(self.x_path[0]), float(self.y_path[0]), float(self.yaw_path[0])])
+
+        total_length = float(self.s_samples[-1])
+        # 超出终点：x/y 保持不动，返回路径终点
+        if s_query >= total_length:
+            return np.array([float(self.x_path[-1]), float(self.y_path[-1]), float(self.yaw_path[-1])])
+
+        # 以真实弧长 s_samples 为插值轴，线性插值 x 和 y
+        x_ref = float(np.interp(s_query, self.s_samples, self.x_path))
+        y_ref = float(np.interp(s_query, self.s_samples, self.y_path))
+        # yaw 使用解卷绕后的连续角度插值，避免 ±π 附近的跳变
+        yaw_unwrapped = float(np.interp(s_query, self.s_samples, self.yaw_path_unwrapped))
+        # 将插值结果重新折叠回 (-π, π]
+        yaw_ref = float(np.arctan2(np.sin(yaw_unwrapped), np.cos(yaw_unwrapped)))
+        return np.array([x_ref, y_ref, yaw_ref])
+
+    def plot(self):
+        """简单的可视化函数"""
+        if len(self.x_path) == 0:
+            print("No path to plot.")
+            return
+        
+        plt.figure(figsize=(8, 8))
+        plt.plot(self.x_path, self.y_path, 'b-', label="Spline Path")
+        plt.quiver(self.x_path[::10], self.y_path[::10], 
+                   np.cos(self.yaw_path[::10]), np.sin(self.yaw_path[::10]), 
+                   color='green', scale=20, width=0.005)
+        plt.axis("equal")
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+
+# --- 调用示例 ---
+if __name__ == "__main__":
+    planner = SplinePlanner()
+
+    # 情况 1: 指定起终点 Yaw (强制掉头)
+    print("Generating path with yaw constraints...")
+    x1, y1, yaw1 = planner.generate_path(
+        x_pts=[0, 2, 4], 
+        y_pts=[0, 1, 0], 
+        start_yaw=0.0,           # 水平向右出发
+        end_yaw=np.deg2rad(180)  # 水平向左结束
+    )
+    planner.plot()
+
+    # 情况 2: 不指定 Yaw (自由平滑插值)
+    print("Generating free path...")
+    x2, y2, yaw2 = planner.generate_path(
+        x_pts=[0, 1, 1, 8], 
+        y_pts=[0, 2, 2.2, 5]
+    )
+    planner.plot()
