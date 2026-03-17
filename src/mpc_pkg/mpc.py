@@ -58,7 +58,7 @@ class MPCModel:
         lterm = 8.0 * pos_err + 2.0 * yaw_err 
        
         self.mpc = do_mpc.controller.MPC(self.model)
-        self.mpc.set_rterm(u_input=np.array([0.2, 0.2, 0.5])) #直接用数值
+        self.mpc.set_rterm(u_input=np.array([50, 50, 50])) #直接用数值
         self.mpc.set_objective(mterm=mterm, lterm=lterm)
         set_up_settings={
             'n_horizon': 20,
@@ -161,7 +161,7 @@ class MPCPathFollower:
         lterm = 8.0 * pos_err + 2.0 * yaw_err 
        
         self.mpc = do_mpc.controller.MPC(self.model)
-        self.mpc.set_rterm(u_input=np.array([0.2, 0.2, 0.5])) #直接用数值
+        self.mpc.set_rterm(u_input=np.array([50, 50, 50])) #直接用数值
         self.mpc.set_objective(mterm=mterm, lterm=lterm)
         set_up_settings={
             'n_horizon': self.n_horizon,
