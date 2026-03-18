@@ -39,5 +39,12 @@ def generate_launch_description():
                 'deadzone': 0.1,
                 'autorepeat_rate': 20.0,
             }]
+        ),
+        #启动foxglove节点
+        Node(
+            package='foxglove_bridge',
+            executable='foxglove_bridge',
+            name='foxglove_bridge',
+            output='screen',
         )
     ])

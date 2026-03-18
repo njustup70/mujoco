@@ -14,7 +14,7 @@
         
         <geom name="floor" type="plane" size="10 10 0.1" material="matplane" friction ="1 0.005 0.005"/>
 
-        <body name="chassis" pos="5.65 5.65 0.1" euler="0 0 270">
+        <body name="chassis" pos="0.0 0.0 0.1" euler="0 0 270">
             <joint name="root_x" type="slide" axis="1 0 0" damping="10"/>
             <joint name="root_y" type="slide" axis="0 1 0" damping="10"/>
             <joint name="root_z" type="hinge" axis="0 0 1" damping="5"/>

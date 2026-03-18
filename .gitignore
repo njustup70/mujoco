@@ -1,3 +1,5 @@
 install/
 log/
 build/
+*.TXT
+*.pyc
