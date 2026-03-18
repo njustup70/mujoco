@@ -25,7 +25,7 @@ class MPCControlNode(Node):
         self.tracked_path_msg = Path()
         self.tracked_path_msg.header.frame_id = self.frame_id
         # self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
-        self.path_follwer=MPCPathFollower(0.1)
+        self.path_follwer=MPCPathFollower(0.1,type='swerve')
         self.cube=linear.SplinePlanner()
         # 生成一条简单的路径
         target_points = np.array([[0, 0], [2, 4]])
