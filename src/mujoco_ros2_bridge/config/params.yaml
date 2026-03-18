@@ -1,23 +1,4 @@
-# MuJoCo 仿真节点（含舵轮响应误差）
-mujoco_node:
-  ros__parameters:
-    use_viewer: true
-    # 轮子响应误差（模拟真实舵轮）
-    wheel_steer_noise_std: 0.008   # 舵角噪声标准差 rad，约 0.46°
-    wheel_drive_noise_std: 0.1     # 驱动速度噪声标准差 rad/s
-    wheel_steer_lag_alpha: 0.3    # 舵角跟踪惯性 (0~1)，越小响应越慢
-    wheel_drive_lag_alpha: 0.3    # 驱动跟踪惯性 (0~1)
-
-odom_noise_node:
-  ros__parameters:
-    # 噪声强度 (单位: 米/弧度/秒)
-    noise_std_pos: 0.01    # 位置噪声 (1cm)
-    noise_std_ori: 0.01    # 姿态噪声 (约0.57度)
-    noise_std_vel: 0.02    # 速度噪声 (0.02m/s)
-
-    # 误差层级控制 (如果两者都为 true，则误差会叠加)
-    publish_100hz: true   # 开启 100Hz 误差层 (base_link_100hz)
-    publish_10hz: false  # 开启 10Hz 误差层 (base_link)
-
-    # 是否发布 TF
-    publish_tf: true
+# 当前 bridge.launch.py 不再向 mujoco_node.py 注入 ROS 参数。
+# 仿真和 odom 噪声默认值由脚本内常量维护：
+# - src/mujoco_ros2_bridge/scripts/mujoco_node.py
+# - src/mujoco_ros2_bridge/scripts/odom_noise_node.py

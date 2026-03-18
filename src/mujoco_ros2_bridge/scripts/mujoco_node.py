@@ -13,23 +13,26 @@ import numpy as np
 from ament_index_python.packages import get_package_share_directory
 import math
 from collections import deque
+from odom_noise_node import OdomNoiseConfig, OdomNoiseGenerator
 
 class MujocoSimNode(Node):
     def __init__(self):
         super().__init__('mujoco_sim_node')
 
-        # 0. 声明并读取参数
-        self.declare_parameter('use_viewer', True)
-        self.use_viewer = self.get_parameter('use_viewer').value
-        # 轮子响应误差（模拟真实舵轮：滞后 + 噪声）
-        self.declare_parameter('wheel_steer_noise_std', 0.008)   # 舵角噪声标准差 rad，约 0.46°
-        self.declare_parameter('wheel_drive_noise_std', 0.1)     # 驱动速度噪声标准差 rad/s
-        self.declare_parameter('wheel_steer_lag_alpha', 0.4)     # 舵角跟踪惯性 (0~1)，越小响应越慢
-        self.declare_parameter('wheel_drive_lag_alpha', 0.6)     # 驱动跟踪惯性 (0~1)
-        self.wheel_steer_noise_std = self.get_parameter('wheel_steer_noise_std').value
-        self.wheel_drive_noise_std = self.get_parameter('wheel_drive_noise_std').value
-        self.wheel_steer_lag_alpha = self.get_parameter('wheel_steer_lag_alpha').value
-        self.wheel_drive_lag_alpha = self.get_parameter('wheel_drive_lag_alpha').value
+        # 0. 简洁默认配置（不依赖 ROS 参数读取）
+        self.use_viewer = True
+        self.wheel_steer_noise_std = 0.008
+        self.wheel_drive_noise_std = 0.1
+        self.wheel_steer_lag_alpha = 0.4
+        self.wheel_drive_lag_alpha = 0.6
+        self.noise_cfg = OdomNoiseConfig(
+            std_pos_100hz=0.0001,
+            std_ori_100hz=0.0001,
+            std_pos_10hz=0.01,
+            std_ori_10hz=0.01,
+            std_vel=0.02,
+        )
+        self.noise_gen = OdomNoiseGenerator(self.noise_cfg)
 
         # 1. 加载模型
         try:
@@ -46,6 +49,8 @@ class MujocoSimNode(Node):
         self.cmd_vel_sub = self.create_subscription(Twist, 'cmd_vel', self.cmd_vel_callback, 10)
         # 发布真值里程计 (Ground Truth)
         self.odom_truth_pub = self.create_publisher(Odometry, 'odom_truth', 10)
+        # 发布带噪声里程计与 TF
+        self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
 
         # 3. 状态变量
@@ -71,7 +76,7 @@ class MujocoSimNode(Node):
         self.reaction_delay_steps = 40 
         self.cmd_buffers = [deque([0.0]*self.reaction_delay_steps, maxlen=self.reaction_delay_steps) for _ in range(8)]
 
-        # 4. 定时器：100Hz 发布真值和 TF
+        # 4. 定时器：100Hz 发布真值与带噪声 odom/TF
         self.timer = self.create_timer(0.01, self.publish_truth_callback)
 
         # 5. 启动仿真线程
@@ -209,18 +214,39 @@ class MujocoSimNode(Node):
         odom.pose.pose.orientation.z = quat[3]
         self.odom_truth_pub.publish(odom)
 
-        # 2. 广播 TF 变换: odom -> base_link_truth (真值)
+        # 2. 由 odom_noise_node.py 模块计算并发布 noisy odom 与 odom->base_link TF
+        noisy_pos, noisy_quat, noisy_v_lin, noisy_v_ang = self.noise_gen.apply_to_truth(odom)
+
+        noisy_odom = Odometry()
+        noisy_odom.header.stamp = current_time.to_msg()
+        noisy_odom.header.frame_id = 'odom'
+        noisy_odom.child_frame_id = 'base_link'
+        noisy_odom.pose.pose.position.x = noisy_pos[0]
+        noisy_odom.pose.pose.position.y = noisy_pos[1]
+        noisy_odom.pose.pose.position.z = noisy_pos[2]
+        noisy_odom.pose.pose.orientation.x = noisy_quat[0]
+        noisy_odom.pose.pose.orientation.y = noisy_quat[1]
+        noisy_odom.pose.pose.orientation.z = noisy_quat[2]
+        noisy_odom.pose.pose.orientation.w = noisy_quat[3]
+        noisy_odom.twist.twist.linear.x = noisy_v_lin[0]
+        noisy_odom.twist.twist.linear.y = noisy_v_lin[1]
+        noisy_odom.twist.twist.linear.z = noisy_v_lin[2]
+        noisy_odom.twist.twist.angular.x = noisy_v_ang[0]
+        noisy_odom.twist.twist.angular.y = noisy_v_ang[1]
+        noisy_odom.twist.twist.angular.z = noisy_v_ang[2]
+        self.odom_pub.publish(noisy_odom)
+
         t = TransformStamped()
         t.header.stamp = current_time.to_msg()
         t.header.frame_id = 'odom'
-        t.child_frame_id = 'base_link_truth'
-        t.transform.translation.x = pos[0]
-        t.transform.translation.y = pos[1]
-        t.transform.translation.z = pos[2]
-        t.transform.rotation.w = quat[0]
-        t.transform.rotation.x = quat[1]
-        t.transform.rotation.y = quat[2]
-        t.transform.rotation.z = quat[3]
+        t.child_frame_id = 'base_link'
+        t.transform.translation.x = noisy_pos[0]
+        t.transform.translation.y = noisy_pos[1]
+        t.transform.translation.z = noisy_pos[2]
+        t.transform.rotation.x = noisy_quat[0]
+        t.transform.rotation.y = noisy_quat[1]
+        t.transform.rotation.z = noisy_quat[2]
+        t.transform.rotation.w = noisy_quat[3]
         self.tf_broadcaster.sendTransform(t)
 
     def destroy_node(self):
