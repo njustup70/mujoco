@@ -109,41 +109,42 @@ class MPCModel:
         return u
     
 class MPCPathFollower:
+    # 1. 切换为连续模型
     def __init__(self, dt):
-        model_type = 'discrete'
+        self.path_planner = SplinePlanner()
+        self.ref_speed = 1.0  # 默认参考速度 (m/s)
+        model_type = 'continuous' 
         self.model = do_mpc.model.Model(model_type)
         self.dt = dt
         self.n_horizon = 20
-        self.s = 0.0
-        self.ref_speed = 0.5
-        self.path_planner = SplinePlanner()
-        self.is_following_path = False
-        #终点
-        self.end_point=np.array([0.0, 0.0, 0.0])
+        self.end_point = np.array([0.0, 0.0, 0.0])
+        self._step_count = 0
+        # do-mpc 默认会持续记录运行历史，长时间运行会让 append/内存开销增长。
+        self._history_reset_interval = 200
+        self.enable_foxglove_stream = True
+
         # State: [x, y, theta]
-        #self.state= mpc.x['state'] 等价写法
         self.state = self.model.set_variable(var_type='_x', var_name='state', shape=(3, 1))
-        # Input (body frame): [vx, vy, vw]
+        # Input (极坐标): [v, alpha, vw]
+        # v: 线速度大小, alpha: 运动方向(舵轮转角), vw: 角速度
         self.u_vec = self.model.set_variable(var_type='_u', var_name='u_input', shape=(3, 1))
-        # 参数,即参考轨迹点 [x_ref, y_ref, theta_ref]
+        
         ref = self.model.set_variable(var_type='_tvp', var_name='ref', shape=(3, 1))
         
-        #定义系统运动学
+        # 2. 定义连续系统动力学 (dx/dt)
         theta = self.state[2]
-        v=self.u_vec[0]
-        alpha=self.u_vec[1]
+        v = self.u_vec[0]
+        alpha = self.u_vec[1]
         vw = self.u_vec[2]
-        # Convert body-frame velocity to world-frame using heading theta.
-        vx_world = v*casadi.cos(theta + alpha)
-        vy_world = v*casadi.sin(theta + alpha)
 
-        next_state = vertcat(
-            self.state[0] + dt * vx_world,
-            self.state[1] + dt * vy_world,
-            self.state[2] + dt * vw,
-        )
+        # 连续时间下的导数项
+        # 注意：这里不再乘以 dt，dt 在 mpc.set_param 中指定
+        x_dot = v * cos(theta + alpha)
+        y_dot = v * sin(theta + alpha)
+        theta_dot = vw
+        next_state=vertcat(x_dot, y_dot, theta_dot)
         assert isinstance(next_state, casadi.SX)
-        self.model.set_rhs('state', next_state)
+        self.model.set_rhs('state',next_state )
         self.model.setup()
 
         pos_err = casadi.sumsqr(self.state[0:2] - ref[0:2])
@@ -156,20 +157,26 @@ class MPCPathFollower:
         # 直接使用平方误差
         yaw_err = casadi.sumsqr(wrapped_angle_diff)
         #结束代价，符号函数
-        mterm = 8.0 * pos_err + 2.0 * yaw_err
+        mterm = 8.0 * pos_err + 1.0 * yaw_err 
         #过程代价
-        lterm = 8.0 * pos_err + 2.0 * yaw_err 
+        lterm = 8.0 * pos_err + 1.0 * yaw_err   # 惩罚过小的速度，鼓励更快地到达目标
        
         self.mpc = do_mpc.controller.MPC(self.model)
-        self.mpc.set_rterm(u_input=np.array([2, 2, 25])) #直接用数值
+        self.mpc.set_rterm(u_input=np.array([2, 5, 10])) #直接用数值
         self.mpc.set_objective(mterm=mterm, lterm=lterm)
         set_up_settings={
             'n_horizon': self.n_horizon,
             't_step': dt,
             'store_full_solution': False,
+            'state_discretization': 'collocation', # 连续系统推荐使用正交胶合
+            'collocation_deg': 2,
             'nlpsol_opts': {
-                'ipopt.print_level': 2,  # 0 关闭 Ipopt 输出 (默认是 5)
-                'print_time': False,     # 关闭 CasADi 的计时输出
+                'ipopt.print_level': 0,      # 关闭 IPOPT 日志
+                'print_time': False,
+                'ipopt.max_iter': 30,        # 限制最大迭代次数提高实时性
+                'ipopt.tol': 1e-3,           # 放宽收敛精度要求
+                'ipopt.linear_solver': 'mumps', # 如果有 HSL 库，改为 'ma27' 或 'ma57' 会快很多
+                'ipopt.mu_strategy': 'adaptive',
             },
         }
         self.mpc.set_param(**set_up_settings)
@@ -221,10 +228,15 @@ class MPCPathFollower:
     def update(self,x):
         assert isinstance(x, np.ndarray) and x.shape ==self.u_vec.shape
         '''根据当前状态 x 计算控制输入'''
+        self._step_count += 1
+        if self._step_count % self._history_reset_interval == 0:
+            self.mpc.reset_history()
+
         self._update_prediction_reference(x)
         u = self.mpc.make_step(x)
         #u是二维数组，形状为 (3, 1)，我们需要将其转换为一维数组
-        foxgloveTools.foxgloveViusalInstance.send(u.flatten(), topic="/mpc/control_input")
+        if self.enable_foxglove_stream:
+            foxgloveTools.foxgloveViusalInstance.send(u.flatten(), topic="/mpc/control_input")
         vx_body=u[0]*cos(u[1])
         vy_body=u[0]*sin(u[1])
         u[0]=vx_body

@@ -117,6 +117,8 @@ class MPCControlNode(Node):
         cmd_msg.linear.y = u[1]
         cmd_msg.angular.z = u[2]
         # 发布控制命令
+        if(u[0]**2+u[1]**2<1e-2):
+            cmd_msg.angular.z=0.0  # 当线速度非常小时，直接将角速度设为0，避免不必要的旋转
         self.pub.publish(cmd_msg)
 
 def main():
