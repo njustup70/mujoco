@@ -28,7 +28,7 @@ class MPCControlNode(Node):
         self.path_follwer=MPCPathFollower(0.1)
         self.cube=linear.SplinePlanner()
         # 生成一条简单的路径
-        target_points = np.array([[0, 0], [7, 1], [1, 3], [10, 2]])
+        target_points = np.array([[0, 0], [2, 4]])
         # self.cube.generate_path(x_pts, y_pts, step_cm=10.0)
         self.path_follwer.set_path(target_points, target_yaw=2.0, ref_speed=2.0)
         self._publish_reference_path_once()
@@ -109,35 +109,13 @@ class MPCControlNode(Node):
             self.initialized = True
             return
 
-        # --- 新增：判断是否到达终点（终点容差限制） ---
-        end_point = self.path_follwer.end_point
-        dist_err = np.hypot(measured_x - end_point[0], measured_y - end_point[1])
-        yaw_diff = measured_theta - end_point[2]
-        yaw_err = abs(np.arctan2(np.sin(yaw_diff), np.cos(yaw_diff))) # 角度归一化求绝对误差
-
-        # 设定容差：位置相差 5 厘米以内，且航向角相差 0.08 弧度 (约 4.5 度) 以内
-        if dist_err < 0.02 and yaw_err < 0.02:
-            cmd_msg = Twist()
-            cmd_msg.linear.x = 0.0
-            cmd_msg.linear.y = 0.0
-            cmd_msg.angular.z = 0.0
-            self.last_u = np.array([0.0, 0.0, 0.0])  # 到达终点，清空历史速度缓存
-            self.pub.publish(cmd_msg)
-            return # 既然已经到达终点，直接退出，不再执行后续昂贵的 MPC 求解
-
         # 新模型下 U 直接是速度 [vx, vy, vw]
         import asyncio
         u=asyncio.run_coroutine_threadsafe(self.path_follwer.async_update(x_mpc), self.loop).result()  # 等待结果
-
-        # --- 新增：对目标速度进行一阶低通滤波，模拟舵轮的真实物理惯性和响应延迟 ---
-        # 公式: v_current = alpha * v_target + (1 - alpha) * v_last
-        self.last_u = self.lpf_alpha * u + (1.0 - self.lpf_alpha) * self.last_u
-        smooth_u = self.last_u
-
         cmd_msg = Twist()
-        cmd_msg.linear.x = smooth_u[0]
-        cmd_msg.linear.y = smooth_u[1]
-        cmd_msg.angular.z = smooth_u[2]
+        cmd_msg.linear.x = u[0]
+        cmd_msg.linear.y = u[1]
+        cmd_msg.angular.z = u[2]
         # 发布控制命令
         self.pub.publish(cmd_msg)
 
