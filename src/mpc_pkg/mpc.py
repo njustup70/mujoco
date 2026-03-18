@@ -130,12 +130,12 @@ class MPCPathFollower:
         
         #定义系统运动学
         theta = self.state[2]
-        vx_body = self.u_vec[0]
-        vy_body = self.u_vec[1]
+        v=self.u_vec[0]
+        alpha=self.u_vec[1]
         vw = self.u_vec[2]
         # Convert body-frame velocity to world-frame using heading theta.
-        vx_world = cos(theta) * vx_body - sin(theta) * vy_body
-        vy_world = sin(theta) * vx_body + cos(theta) * vy_body
+        vx_world = v*casadi.cos(theta + alpha)
+        vy_world = v*casadi.sin(theta + alpha)
 
         next_state = vertcat(
             self.state[0] + dt * vx_world,
@@ -161,7 +161,7 @@ class MPCPathFollower:
         lterm = 8.0 * pos_err + 2.0 * yaw_err 
        
         self.mpc = do_mpc.controller.MPC(self.model)
-        self.mpc.set_rterm(u_input=np.array([5, 5, 5])) #直接用数值
+        self.mpc.set_rterm(u_input=np.array([2, 2, 25])) #直接用数值
         self.mpc.set_objective(mterm=mterm, lterm=lterm)
         set_up_settings={
             'n_horizon': self.n_horizon,
@@ -224,6 +224,11 @@ class MPCPathFollower:
         self._update_prediction_reference(x)
         u = self.mpc.make_step(x)
         #u是二维数组，形状为 (3, 1)，我们需要将其转换为一维数组
+        foxgloveTools.foxgloveViusalInstance.send(u.flatten(), topic="/mpc/control_input")
+        vx_body=u[0]*cos(u[1])
+        vy_body=u[0]*sin(u[1])
+        u[0]=vx_body
+        u[1]=vy_body
         # print(self.mpc.data)
         return u.flatten()
     def set_target_point(self, target:np.ndarray):
