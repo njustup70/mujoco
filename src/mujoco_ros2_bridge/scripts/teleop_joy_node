@@ -15,10 +15,10 @@ class TeleopJoyNode(Node):
             self.joy_callback,
             10)
         
-        # 恢复标准映射：
-        # 轴 1：左摇杆上下 (前后移动)
-        # 轴 0：左摇杆左右 (横向侧移)
-        # 轴 2：右摇杆左右 (原地旋转)
+        # 修正标准映射：
+        # Axis 1：左摇杆上下 (前后移动 -> Twist.linear.x)
+        # Axis 0：左摇杆左右 (横向侧移 -> Twist.linear.y)
+        # Axis 3：右摇杆左右 (原地旋转 -> Twist.angular.z)
         self.declare_parameter('axis_linear_x', 1)  
         self.declare_parameter('axis_linear_y', 0)  
         self.declare_parameter('axis_angular_z', 3) 
@@ -35,7 +35,7 @@ class TeleopJoyNode(Node):
         scale_l = self.get_parameter('scale_linear').value
         scale_a = self.get_parameter('scale_angular').value
 
-        DEADZONE = 0.1
+        DEADZONE = 0.05
 
         # 1. 前后控制 (X轴)
         # 向上推是负值，所以加负号实现前进
