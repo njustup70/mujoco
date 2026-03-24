@@ -43,6 +43,13 @@ class MujocoSimNode(Node):
         self.get_logger().info(f'Loading MuJoCo model from: {model_path}')
         self.model = mujoco.MjModel.from_xml_path(model_path)
         self.data = mujoco.MjData(self.model)
+        self.chassis_body_id = mujoco.mj_name2id(
+            self.model,
+            mujoco.mjtObj.mjOBJ_BODY,
+            'chassis',
+        )
+        if self.chassis_body_id < 0:
+            raise RuntimeError("Body 'chassis' not found in MuJoCo model.")
 
         # 2. 通讯组件
         self.cmd_vel_sub = self.create_subscription(Twist, 'cmd_vel', self.cmd_vel_callback, 10)
@@ -87,11 +94,26 @@ class MujocoSimNode(Node):
         self.thread.start()
 
     def _compute_truth_twist_body(self):
-        """Read ground-truth body twist from MuJoCo data (fallback to zeros if unavailable)."""
+        """Read chassis twist in local body frame (base_link_truth)."""
         try:
-            cvel = np.asarray(self.data.body('chassis').cvel, dtype=float)
-            # MuJoCo cvel convention: [wx, wy, wz, vx, vy, vz] in body frame.
-            return float(cvel[3]), float(cvel[4]), float(cvel[5]), float(cvel[0]), float(cvel[1]), float(cvel[2])
+            vel_local = np.zeros(6, dtype=float)
+            mujoco.mj_objectVelocity(
+                self.model,
+                self.data,
+                mujoco.mjtObj.mjOBJ_BODY,
+                self.chassis_body_id,
+                vel_local,
+                1,  # 1 => return velocity in local (body) frame
+            )
+            # MuJoCo output order: [wx, wy, wz, vx, vy, vz]
+            return (
+                float(vel_local[3]),
+                float(vel_local[4]),
+                float(vel_local[5]),
+                float(vel_local[0]),
+                float(vel_local[1]),
+                float(vel_local[2]),
+            )
         except Exception:
             return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
