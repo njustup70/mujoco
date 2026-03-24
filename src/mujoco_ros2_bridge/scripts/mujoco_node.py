@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist, TransformStamped
+from geometry_msgs.msg import Twist, TwistStamped, TransformStamped
 from nav_msgs.msg import Odometry
 import tf2_ros
 import mujoco
@@ -25,8 +25,8 @@ class MujocoSimNode(Node):
         self.wheel_steer_lag_alpha = 0.0
         self.wheel_drive_lag_alpha = 0.0
         self.noise_cfg = OdomNoiseConfig(
-            std_pos_100hz=0.02,
-            std_ori_100hz=0.02,
+            std_pos_100hz=0.001,
+            std_ori_100hz=0.001,
             std_pos_10hz=0.01,
             std_ori_10hz=0.01,
             std_vel=0.02,
@@ -48,6 +48,8 @@ class MujocoSimNode(Node):
         self.cmd_vel_sub = self.create_subscription(Twist, 'cmd_vel', self.cmd_vel_callback, 10)
         # 发布真值里程计 (Ground Truth)
         self.odom_truth_pub = self.create_publisher(Odometry, 'odom_truth', 10)
+        # 发布真值速度（车体系）
+        self.truth_vel_pub = self.create_publisher(TwistStamped, 'mujoco/truth_velocity', 10)
         # 发布带噪声里程计与 TF
         self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
@@ -83,6 +85,15 @@ class MujocoSimNode(Node):
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.simulation_loop)
         self.thread.start()
+
+    def _compute_truth_twist_body(self):
+        """Read ground-truth body twist from MuJoCo data (fallback to zeros if unavailable)."""
+        try:
+            cvel = np.asarray(self.data.body('chassis').cvel, dtype=float)
+            # MuJoCo cvel convention: [wx, wy, wz, vx, vy, vz] in body frame.
+            return float(cvel[3]), float(cvel[4]), float(cvel[5]), float(cvel[0]), float(cvel[1]), float(cvel[2])
+        except Exception:
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
     def cmd_vel_callback(self, msg):
         self.target_v_x = msg.linear.x
@@ -159,7 +170,25 @@ class MujocoSimNode(Node):
         odom.pose.pose.orientation.x = quat[1]
         odom.pose.pose.orientation.y = quat[2]
         odom.pose.pose.orientation.z = quat[3]
+        vx_b, vy_b, vz_b, wx_b, wy_b, wz_b = self._compute_truth_twist_body()
+        odom.twist.twist.linear.x = vx_b
+        odom.twist.twist.linear.y = vy_b
+        odom.twist.twist.linear.z = vz_b
+        odom.twist.twist.angular.x = wx_b
+        odom.twist.twist.angular.y = wy_b
+        odom.twist.twist.angular.z = wz_b
         self.odom_truth_pub.publish(odom)
+
+        truth_vel = TwistStamped()
+        truth_vel.header.stamp = current_time.to_msg()
+        truth_vel.header.frame_id = 'base_link_truth'
+        truth_vel.twist.linear.x = vx_b
+        truth_vel.twist.linear.y = vy_b
+        truth_vel.twist.linear.z = vz_b
+        truth_vel.twist.angular.x = wx_b
+        truth_vel.twist.angular.y = wy_b
+        truth_vel.twist.angular.z = wz_b
+        self.truth_vel_pub.publish(truth_vel)
 
         # 2. 由 odom_noise_node.py 模块计算并发布 noisy odom 与 odom->base_link TF
         noisy_pos, noisy_quat, noisy_v_lin, noisy_v_ang = self.noise_gen.apply_to_truth(odom)

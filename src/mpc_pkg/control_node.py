@@ -4,7 +4,7 @@ from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import Twist, PoseStamped
 import linear
 from mpc import MPCModel,MPCPathFollower
-import foxgloveTools
+from state_observer import PoseVelocityObserver
 class MPCControlNode(Node):
     def __init__(self):
         super().__init__('mpc_control_node')
@@ -16,6 +16,8 @@ class MPCControlNode(Node):
             self.odom_callback,
             10)
         self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.mpc_speed_pub = self.create_publisher(Twist, '/mpc/control_input', 10)
+        self.observer_speed_pub = self.create_publisher(Twist, '/mpc/observed_velocity', 10)
         self.ref_path_pub = self.create_publisher(Path, '/mpc/reference_path', 10)
         self.tracked_path_pub = self.create_publisher(Path, '/mpc/tracked_path', 10)
         self.frame_id = 'odom'
@@ -25,16 +27,24 @@ class MPCControlNode(Node):
         self.tracked_path_msg = Path()
         self.tracked_path_msg.header.frame_id = self.frame_id
         # self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
-        self.path_follwer=MPCPathFollower(0.1,type='swerve')
+        self.path_follwer=MPCPathFollower(0.1,type='omni')
         self.cube=linear.SplinePlanner()
         # 生成一条简单的路径
-        target_points = np.array([[0, 0], [2, 4]])
+        target_points = np.array([[0, 0], [2, 4],[2,10]])
         # self.cube.generate_path(x_pts, y_pts, step_cm=10.0)
         self.path_follwer.set_path(target_points, target_yaw=2.0, ref_speed=2.0)
         self._publish_reference_path_once()
         self.ref_path_timer = self.create_timer(0.5, self._publish_reference_path_once)
         self.initialized = False
-
+        self.state_observer = PoseVelocityObserver(
+            min_dt=1e-3,
+            max_dt=0.2,
+            q_linear_acc=4.0,
+            q_yaw_acc=2.0,
+            r_pos=0.01,
+            r_yaw=0.02,
+        )
+        self.observed_body_velocity = np.zeros(3, dtype=float)
         # --- 新增：底层控制输出平滑（模拟物理电机的响应过程与惯性） ---
         self.last_u = np.array([0.0, 0.0, 0.0])
         self.lpf_alpha = 0.2  # 低通滤波系数(0.0~1.0)，越小底盘响应越柔和，舵轮转向过程越明显
@@ -98,6 +108,21 @@ class MPCControlNode(Node):
         siny_cosp = 2 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
         measured_theta = np.arctan2(siny_cosp, cosy_cosp)
+
+        # 由 x/y/yaw 观测车体速度: [vx_body, vy_body, yaw_rate]
+        stamp = msg.header.stamp
+        stamp_sec = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+        self.observed_body_velocity = self.state_observer.update(
+            measured_x,
+            measured_y,
+            measured_theta,
+            stamp_sec=stamp_sec,
+        )
+        obs_msg = Twist()
+        obs_msg.linear.x = float(self.observed_body_velocity[0])
+        obs_msg.linear.y = float(self.observed_body_velocity[1])
+        obs_msg.angular.z = float(self.observed_body_velocity[2])
+        self.observer_speed_pub.publish(obs_msg)
         self._append_tracked_pose(measured_x, measured_y, measured_theta)
 
         x_mpc = np.array([[measured_x], [measured_y], [measured_theta]])
@@ -120,6 +145,7 @@ class MPCControlNode(Node):
         if(u[0]**2+u[1]**2<1e-2):
             cmd_msg.angular.z=0.0  # 当线速度非常小时，直接将角速度设为0，避免不必要的旋转
         self.pub.publish(cmd_msg)
+        self.mpc_speed_pub.publish(cmd_msg)
 
 def main():
     import rclpy
