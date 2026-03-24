@@ -30,7 +30,7 @@ class MPCControlNode(Node):
         self.path_follwer=MPCPathFollower(0.1,type='omni')
         self.cube=linear.SplinePlanner()
         # 生成一条简单的路径
-        target_points = np.array([[0, 0], [2, 4],[2,10]])
+        target_points = np.array([[0, 0], [2, 4],[2,10],[20,10]])
         # self.cube.generate_path(x_pts, y_pts, step_cm=10.0)
         self.path_follwer.set_path(target_points, target_yaw=2.0, ref_speed=2.0)
         self._publish_reference_path_once()
