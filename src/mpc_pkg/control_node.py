@@ -39,10 +39,13 @@ class MPCControlNode(Node):
         self.state_observer = PoseVelocityObserver(
             min_dt=1e-3,
             max_dt=0.2,
-            q_linear_acc=4.0,
-            q_yaw_acc=2.0,
-            r_pos=0.01,
-            r_yaw=0.02,
+            # 针对 10Hz, 0.5~1cm 量测噪声的观测器参数
+            q_linear_acc=10.0,
+            q_yaw_acc=4.0,
+            r_pos=5e-4,
+            r_yaw=2.0e-4,
+            reset_threshold_pos=0.5,
+            reset_threshold_yaw=0.8,
         )
         self.observed_body_velocity = np.zeros(3, dtype=float)
         # --- 新增：底层控制输出平滑（模拟物理电机的响应过程与惯性） ---

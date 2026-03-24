@@ -12,12 +12,12 @@ class PoseVelocityObserver:
         self,
         min_dt: float = 1e-3,
         max_dt: float = 0.2,
-        q_linear_acc: float = 4.0,
-        q_yaw_acc: float = 2.0,
-        r_pos: float = 0.01,
-        r_yaw: float = 0.02,
-        reset_threshold_pos: float = 1.0,
-        reset_threshold_yaw: float = 1.0,
+        q_linear_acc: float = 1.0,
+        q_yaw_acc: float = 0.8,
+        r_pos: float = 6.4e-5,
+        r_yaw: float = 2.0e-4,
+        reset_threshold_pos: float = 0.5,
+        reset_threshold_yaw: float = 0.8,
     ):
         if min_dt <= 0.0:
             raise ValueError("min_dt must be > 0.")

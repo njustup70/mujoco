@@ -25,10 +25,10 @@ class MujocoSimNode(Node):
         self.wheel_steer_lag_alpha = 0.0
         self.wheel_drive_lag_alpha = 0.0
         self.noise_cfg = OdomNoiseConfig(
-            std_pos_100hz=0.001,
-            std_ori_100hz=0.001,
-            std_pos_10hz=0.01,
-            std_ori_10hz=0.01,
+            std_pos_100hz=0.00001,
+            std_ori_100hz=0.00001,
+            std_pos_10hz=0.001,
+            std_ori_10hz=0.001,
             std_vel=0.02,
         )
         self.noise_gen = OdomNoiseGenerator(self.noise_cfg)
