@@ -83,7 +83,7 @@ class MPCModel:
 
         self.mpc.set_p_fun(p_fun)
         self.mpc.setup()
-        from concurrent.futures import ProcessPoolExecutor,ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor
         self.pool= ThreadPoolExecutor(max_workers=1)
     def set_state_init(self, x0):
         '''设置 MPC 的初始状态'''
@@ -91,7 +91,7 @@ class MPCModel:
         self.mpc.set_initial_guess()
     @time_print(10)
     def update(self,x):
-        assert isinstance(x, np.ndarray) and x.shape ==self.u_vec.shape
+        assert isinstance(x, np.ndarray) and x.shape == (3, 1)
         '''根据当前状态 x 计算控制输入'''
         u = self.mpc.make_step(x)
         #u是二维数组，形状为 (3, 1)，我们需要将其转换为一维数组
@@ -109,41 +109,100 @@ class MPCModel:
         return u
     
 class MPCPathFollower:
-    def __init__(self, dt):
-        model_type = 'discrete'
-        self.model = do_mpc.model.Model(model_type)
-        self.dt = dt
+    def __init__(self, dt,type='swerve'):
+        assert type in ['swerve', 'omni'], "type must be 'swerve' or 'omni'"
+
+        # --- 模型配置 ---
+        self.drive_type = type
+        self.dt = float(dt)
         self.n_horizon = 20
-        self.s = 0.0
-        self.ref_speed = 0.5
+        model_type = 'continuous' if self.drive_type == 'swerve' else 'discrete'
+
+        # --- 路径与运行状态 ---
         self.path_planner = SplinePlanner()
         self.is_following_path = False
-        #终点
-        self.end_point=np.array([0.0, 0.0, 0.0])
-        # State: [x, y, theta]
-        #self.state= mpc.x['state'] 等价写法
-        self.state = self.model.set_variable(var_type='_x', var_name='state', shape=(3, 1))
-        # Input (body frame): [vx, vy, vw]
-        self.u_vec = self.model.set_variable(var_type='_u', var_name='u_input', shape=(3, 1))
-        # 参数,即参考轨迹点 [x_ref, y_ref, theta_ref]
-        ref = self.model.set_variable(var_type='_tvp', var_name='ref', shape=(3, 1))
-        
-        #定义系统运动学
-        theta = self.state[2]
-        vx_body = self.u_vec[0]
-        vy_body = self.u_vec[1]
-        vw = self.u_vec[2]
-        # Convert body-frame velocity to world-frame using heading theta.
-        vx_world = cos(theta) * vx_body - sin(theta) * vy_body
-        vy_world = sin(theta) * vx_body + cos(theta) * vy_body
+        self.ref_speed = 1.0
+        self.end_point = np.array([0.0, 0.0, 0.0])
+        self.s = 0.0
+        self._step_count = 0
+        # do-mpc 默认会持续记录运行历史，长时间运行会让 append/内存开销增长。
+        self._history_reset_interval = 200
+        self.enable_foxglove_stream = True
 
-        next_state = vertcat(
-            self.state[0] + dt * vx_world,
-            self.state[1] + dt * vy_world,
-            self.state[2] + dt * vw,
-        )
-        assert isinstance(next_state, casadi.SX)
-        self.model.set_rhs('state', next_state)
+        self.model = do_mpc.model.Model(model_type)
+
+        # State: [x, y, theta]
+        self.state = self.model.set_variable(var_type='_x', var_name='state', shape=(3, 1))
+        # Input:
+        # - swerve: [v, alpha, vw]
+        # - omni:   [vx_body, vy_body, vw]
+        self.u_vec = self.model.set_variable(var_type='_u', var_name='u_input', shape=(3, 1))
+        ref = self.model.set_variable(var_type='_tvp', var_name='ref', shape=(3, 1))
+
+        # --- 按底盘类型定义动力学 ---
+        theta = self.state[2]
+        if self.drive_type == 'swerve':
+            v = self.u_vec[0]
+            alpha = self.u_vec[1]
+            vw = self.u_vec[2]
+
+            # 连续系统: x_dot = f(x,u)
+            x_dot = v * cos(theta + alpha)
+            y_dot = v * sin(theta + alpha)
+            theta_dot = vw
+            rhs_state = vertcat(x_dot, y_dot, theta_dot)
+
+            rterm = np.array([2.0, 5.0, 10.0])
+            lower_u = np.array([[-3.0], [-np.pi], [-2.0]])
+            upper_u = np.array([[3.0], [np.pi], [2.0]])
+            set_up_settings = {
+                'n_horizon': self.n_horizon,
+                't_step': self.dt,
+                'store_full_solution': False,
+                'state_discretization': 'collocation',
+                'collocation_deg': 2,
+                'nlpsol_opts': {
+                    'ipopt.print_level': 0,
+                    'print_time': False,
+                    'ipopt.max_iter': 30,
+                    'ipopt.tol': 1e-3,
+                    'ipopt.linear_solver': 'mumps',
+                    'ipopt.mu_strategy': 'adaptive',
+                },
+            }
+        else:
+            vx_body = self.u_vec[0]
+            vy_body = self.u_vec[1]
+            vw = self.u_vec[2]
+
+            # 离散系统: x(k+1) = f(x(k),u(k))
+            vx_world = cos(theta) * vx_body - sin(theta) * vy_body
+            vy_world = sin(theta) * vx_body + cos(theta) * vy_body
+            rhs_state = vertcat(
+                self.state[0] + self.dt * vx_world,
+                self.state[1] + self.dt * vy_world,
+                self.state[2] + self.dt * vw,
+            )
+
+            rterm = np.array([50.0, 50.0, 50.0])
+            lower_u = np.array([[-3.0], [-3.0], [-2.0]])
+            upper_u = np.array([[3.0], [3.0], [2.0]])
+            set_up_settings = {
+                'n_horizon': self.n_horizon,
+                't_step': self.dt,
+                'store_full_solution': False,
+                'nlpsol_opts': {
+                    'ipopt.print_level': 0,
+                    'print_time': False,
+                    'ipopt.max_iter': 30,
+                    'ipopt.tol': 1e-3,
+                    'ipopt.linear_solver': 'mumps',
+                    'ipopt.mu_strategy': 'adaptive',
+                },
+            }
+
+        assert isinstance(rhs_state, casadi.SX)
+        self.model.set_rhs('state', rhs_state)
         self.model.setup()
 
         pos_err = casadi.sumsqr(self.state[0:2] - ref[0:2])
@@ -156,26 +215,16 @@ class MPCPathFollower:
         # 直接使用平方误差
         yaw_err = casadi.sumsqr(wrapped_angle_diff)
         #结束代价，符号函数
-        mterm = 8.0 * pos_err + 2.0 * yaw_err
+        mterm = 8.0 * pos_err + 1.0 * yaw_err 
         #过程代价
-        lterm = 8.0 * pos_err + 2.0 * yaw_err 
+        lterm = 8.0 * pos_err + 1.0 * yaw_err
        
         self.mpc = do_mpc.controller.MPC(self.model)
-        self.mpc.set_rterm(u_input=np.array([50, 50, 50])) #直接用数值
+        self.mpc.set_rterm(u_input=rterm)
         self.mpc.set_objective(mterm=mterm, lterm=lterm)
-        set_up_settings={
-            'n_horizon': self.n_horizon,
-            't_step': dt,
-            'store_full_solution': False,
-            'nlpsol_opts': {
-                'ipopt.print_level': 2,  # 0 关闭 Ipopt 输出 (默认是 5)
-                'print_time': False,     # 关闭 CasADi 的计时输出
-            },
-        }
         self.mpc.set_param(**set_up_settings)
-        # Velocity bounds in body frame.
-        self.mpc.bounds['lower', '_u', 'u_input'] = np.array([[-3.0], [-3.0], [-2.0]])
-        self.mpc.bounds['upper', '_u', 'u_input'] = np.array([[3.0], [3.0], [2.0]])
+        self.mpc.bounds['lower', '_u', 'u_input'] = lower_u
+        self.mpc.bounds['upper', '_u', 'u_input'] = upper_u
 
         # 参数注册
         tvp_template=self.mpc.get_tvp_template()
@@ -186,7 +235,7 @@ class MPCPathFollower:
 
         self.mpc.set_tvp_fun(tvp_fun)
         self.mpc.setup()
-        from concurrent.futures import ProcessPoolExecutor,ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor
         self.pool= ThreadPoolExecutor(max_workers=1)
 
     def set_path(self,target_points: np.ndarray,target_yaw: float, ref_speed=None):
@@ -219,11 +268,25 @@ class MPCPathFollower:
         self.mpc.set_initial_guess()
     @time_print(10)
     def update(self,x):
-        assert isinstance(x, np.ndarray) and x.shape ==self.u_vec.shape
+        assert isinstance(x, np.ndarray) and x.shape == (3, 1)
         '''根据当前状态 x 计算控制输入'''
+        self._step_count += 1
+        if self._step_count % self._history_reset_interval == 0:
+            self.mpc.reset_history()
+
         self._update_prediction_reference(x)
         u = self.mpc.make_step(x)
         #u是二维数组，形状为 (3, 1)，我们需要将其转换为一维数组
+        if self.enable_foxglove_stream:
+            foxgloveTools.foxgloveViusalInstance.send(u.flatten(), topic="/mpc/control_input")
+
+        # swerve 输出 [v, alpha, vw]，对外统一成 [vx_body, vy_body, vw]
+        if self.drive_type == 'swerve':
+            vx_body = u[0] * cos(u[1])
+            vy_body = u[0] * sin(u[1])
+            u[0] = vx_body
+            u[1] = vy_body
+
         # print(self.mpc.data)
         return u.flatten()
     def set_target_point(self, target:np.ndarray):
