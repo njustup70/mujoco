@@ -12,6 +12,7 @@ import time
 import numpy as np
 from ament_index_python.packages import get_package_share_directory
 from odom_noise_node import OdomNoiseConfig, OdomNoiseGenerator
+from pid_controller import PIDController
 from swerve_solver import SwerveSolver
 
 class MujocoSimNode(Node):
@@ -22,8 +23,17 @@ class MujocoSimNode(Node):
         self.use_viewer = True
         self.wheel_steer_noise_std = 0.008
         self.wheel_drive_noise_std = 0.1
-        self.wheel_steer_lag_alpha = 0.0
-        self.wheel_drive_lag_alpha = 0.0
+        self.wheel_steer_lag_alpha = 0.35
+        self.wheel_drive_lag_alpha = 0.25
+        self.drive_pid_kp = 1.2
+        self.drive_pid_ki = 0.35
+        self.drive_pid_kd = 0.02
+        self.drive_pid_integral_limit = np.inf
+        self.drive_force_limit = np.inf
+        self.low_speed_drive_threshold = 2.5
+        self.low_speed_response_gain_min = 0.3
+        self.process_steer_std = 0.003
+        self.process_drive_std = 0.06
         self.noise_cfg = OdomNoiseConfig(
             std_pos_100hz=0.00001,
             std_ori_100hz=0.00001,
@@ -74,6 +84,23 @@ class MujocoSimNode(Node):
             self.model.jnt_qposadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, f'wheel{i}_steer')]
             for i in range(4)
         ]
+        self.drive_qveladr = [
+            self.model.jnt_dofadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, f'wheel{i}_drive')]
+            for i in range(4)
+        ]
+        self.drive_pid = [
+            PIDController(
+                kp=self.drive_pid_kp,
+                ki=self.drive_pid_ki,
+                kd=self.drive_pid_kd,
+                dt=self.model.opt.timestep,
+                output_min=-np.inf,
+                output_max=np.inf,
+                integral_min=-np.inf,
+                integral_max=np.inf,
+            )
+            for _ in range(4)
+        ]
 
         # 舵轮解算器：内部管理一阶滞后和噪声
         self.swerve_solver = SwerveSolver(
@@ -83,6 +110,10 @@ class MujocoSimNode(Node):
             drive_lag_alpha=self.wheel_drive_lag_alpha,
             steer_noise_std=self.wheel_steer_noise_std,
             drive_noise_std=self.wheel_drive_noise_std,
+            low_speed_drive_threshold=self.low_speed_drive_threshold,
+            low_speed_response_gain_min=self.low_speed_response_gain_min,
+            process_steer_std=self.process_steer_std,
+            process_drive_std=self.process_drive_std,
         )
 
         # 4. 定时器：100Hz 发布真值与带噪声 odom/TF
@@ -152,15 +183,18 @@ class MujocoSimNode(Node):
             # 2. 读取当前实际舵角
             current_steer_angles = [self.data.qpos[self.steer_qposadr[i]] for i in range(4)]
             
-            # 3. 应用电机动力学：一阶滞后 + 响应噪声
-            motor_commands = self.swerve_solver.apply_motor_dynamics(
+            # 3. 舵向走原有动态，驱动轮改为 PID 力控。
+            steer_commands = self.swerve_solver.apply_steer_dynamics(
                 list(target_steer_list),
-                list(target_drive_list),
-                current_steer_angles
+                current_steer_angles,
             )
             
             # 4. 下达电机指令
-            for i, (steer_ctrl, drive_ctrl) in enumerate(motor_commands):
+            for i, steer_ctrl in enumerate(steer_commands):
+                target_drive = float(target_drive_list[i]) + np.random.normal(0.0, self.process_drive_std)
+                current_drive = float(self.data.qvel[self.drive_qveladr[i]])
+                drive_force = self.drive_pid[i].update(target_drive, current_drive)
+                drive_ctrl = drive_force + np.random.normal(0.0, self.wheel_drive_noise_std)
                 self.data.actuator(f'steer{i}').ctrl[0] = steer_ctrl
                 self.data.actuator(f'drive{i}').ctrl[0] = drive_ctrl
 
