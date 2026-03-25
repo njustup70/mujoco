@@ -127,7 +127,7 @@ class MPCPathFollower:
         # do-mpc 默认会持续记录运行历史，长时间运行会让 append/内存开销增长。
         self._history_reset_interval = 200
         self.model = do_mpc.model.Model(model_type)
-        # State: [x, y, theta, dx, dy, dtheta] (6维扩张状态，后3维为扰动项)
+        # State: [x, y, theta, dvx_body, dvy_body, dwz] (6维扩张状态，后3维为车体系速度扰动)
         self.state = self.model.set_variable(var_type='_x', var_name='state', shape=(6, 1))
         # Input:
         # - swerve: [v, alpha, vw]
@@ -136,24 +136,28 @@ class MPCPathFollower:
         ref = self.model.set_variable(var_type='_tvp', var_name='ref', shape=(3, 1))
 
         # --- 按底盘类型定义动力学 ---
-        # 提取原始状态与扰动项
+        # 提取原始状态与扰动项（扰动定义在车体系速度上）
         x, y, theta = self.state[0], self.state[1], self.state[2]
-        dx, dy, dtheta = self.state[3], self.state[4], self.state[5]
+        dvx_body, dvy_body, dwz = self.state[3], self.state[4], self.state[5]
         
         if self.drive_type == 'swerve':
             v = self.u_vec[0]
             alpha = self.u_vec[1]
             vw = self.u_vec[2]
 
-            # 连续系统: x_dot = f(x,u) + 扰动项
-            x_dot = v * cos(theta + alpha) + dx
-            y_dot = v * sin(theta + alpha) + dy
-            theta_dot = vw + dtheta
+            # 连续系统: 先在车体系叠加速度扰动，再转换到世界系。
+            vx_body_nom = v * cos(alpha)
+            vy_body_nom = v * sin(alpha)
+            vx_body_eff = vx_body_nom + dvx_body
+            vy_body_eff = vy_body_nom + dvy_body
+            x_dot = cos(theta) * vx_body_eff - sin(theta) * vy_body_eff
+            y_dot = sin(theta) * vx_body_eff + cos(theta) * vy_body_eff
+            theta_dot = vw + dwz
             # 扰动在预测域内认为是常数（衰减由观测器处理）
-            dx_dot = 0.0
-            dy_dot = 0.0
-            dtheta_dot = 0.0
-            rhs_state = vertcat(x_dot, y_dot, theta_dot, dx_dot, dy_dot, dtheta_dot)
+            dvx_dot = 0.0
+            dvy_dot = 0.0
+            dwz_dot = 0.0
+            rhs_state = vertcat(x_dot, y_dot, theta_dot, dvx_dot, dvy_dot, dwz_dot)
 
             rterm = np.array([2.0, 5.0, 10.0])
             lower_u = np.array([[-3.0], [-np.pi], [-2.0]])
@@ -178,23 +182,25 @@ class MPCPathFollower:
             vy_body = self.u_vec[1]
             vw = self.u_vec[2]
 
-            # 离散系统: x(k+1) = f(x(k),u(k)) + 扰动项
-            vx_world = cos(theta) * vx_body - sin(theta) * vy_body
-            vy_world = sin(theta) * vx_body + cos(theta) * vy_body
-            # 基本运动学 + 扰动（扰动在预测域内认为是常数）
-            x_next = x + self.dt * vx_world + dx
-            y_next = y + self.dt * vy_world + dy
-            theta_next = theta + self.dt * vw + dtheta
-            dx_next = dx
-            dy_next = dy
-            dtheta_next = dtheta
+            # 离散系统: 车体系速度先叠加扰动，再做坐标变换。
+            vx_body_eff = vx_body + dvx_body
+            vy_body_eff = vy_body + dvy_body
+            vw_eff = vw + dwz
+            vx_world = cos(theta) * vx_body_eff - sin(theta) * vy_body_eff
+            vy_world = sin(theta) * vx_body_eff + cos(theta) * vy_body_eff
+            x_next = x + self.dt * vx_world
+            y_next = y + self.dt * vy_world
+            theta_next = theta + self.dt * vw_eff
+            dvx_next = dvx_body
+            dvy_next = dvy_body
+            dwz_next = dwz
             rhs_state = vertcat(
                 x_next,
                 y_next,
                 theta_next,
-                dx_next,
-                dy_next,
-                dtheta_next,
+                dvx_next,
+                dvy_next,
+                dwz_next,
             )
 
             rterm = np.array([50.0, 50.0, 50.0])
@@ -218,8 +224,7 @@ class MPCPathFollower:
         self.model.set_rhs('state', rhs_state)
         self.model.setup()
 
-        # 成本函数只考虑位置/角度误差，不直接惩罚扰动
-        # （扰动会通过其在动力学中的影响间接被优化）
+        # 成本函数在位置/角度误差基础上，增加对扰动状态的轻惩罚，降低对扰动的过敏响应。
         pos_err = casadi.sumsqr(self.state[0:2] - ref[0:2])
         # Use cosine yaw cost to avoid angle wrap jump at +-pi.
         # yaw_err = 1.0 - casadi.cos(self.state[2] - ref[2])
@@ -229,10 +234,11 @@ class MPCPathFollower:
         
         # 直接使用平方误差
         yaw_err = casadi.sumsqr(wrapped_angle_diff)
+        dist_err = casadi.sumsqr(self.state[3:6])
         #结束代价，符号函数
         mterm = 8.0 * pos_err + 1.0 * yaw_err 
         #过程代价
-        lterm = 8.0 * pos_err + 1.0 * yaw_err
+        lterm = 8.0 * pos_err + 1.0 * yaw_err 
        
         self.mpc = do_mpc.controller.MPC(self.model)
         self.mpc.set_rterm(u_input=rterm)

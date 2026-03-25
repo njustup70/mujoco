@@ -27,7 +27,7 @@ class MPCControlNode(Node):
         self.tracked_path_msg = Path()
         self.tracked_path_msg.header.frame_id = self.frame_id
         # self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
-        self.path_follwer=MPCPathFollower(0.1,type='swerve')
+        self.path_follwer=MPCPathFollower(0.1,type='omni')
         self.cube=linear.SplinePlanner()
         # 生成一条简单的路径
         target_points = np.array([[0, 0], [2, 4],[2,10],[20,10]])
@@ -58,6 +58,11 @@ class MPCControlNode(Node):
         # --- 新增：底层控制输出平滑（模拟物理电机的响应过程与惯性） ---
         self.last_u = np.array([0.0, 0.0, 0.0])
         self.lpf_alpha = 0.2  # 低通滤波系数(0.0~1.0)，越小底盘响应越柔和，舵轮转向过程越明显
+        # 扰动注入抑制参数（不做低通，仅做死区与限幅）
+        self.disturbance_deadband_lin = 0.05
+        self.disturbance_deadband_yaw = 0.03
+        self.disturbance_max_lin = 0.8
+        self.disturbance_max_yaw = 0.8
 
         import asyncio,threading
         self.loop=asyncio.new_event_loop()
@@ -135,18 +140,43 @@ class MPCControlNode(Node):
         self.observer_speed_pub.publish(obs_msg)
         self._append_tracked_pose(measured_x, measured_y, measured_theta)
 
-        x_mpc = np.array([[measured_x], [measured_y], [measured_theta]])
+        x_mpc = np.array([[measured_x], [measured_y], [measured_theta]], dtype=float)
 
         if not self.initialized:
             self.control.mpc.x0 = x_mpc
             self.control.mpc.set_initial_guess()
-            self.path_follwer.set_state_init(x_mpc)
+            x_mpc_ext = np.array(
+                [[measured_x], [measured_y], [measured_theta], [0.0], [0.0], [0.0]],
+                dtype=float,
+            )
+            self.path_follwer.set_state_init(x_mpc_ext)
             self.initialized = True
             return
 
+        # 观测到的车体系速度与上一拍控制速度之差, 作为“等效扰动速度”。
+        dvx_body = float(self.observed_body_velocity[0] - self.last_u[0])
+        dvy_body = float(self.observed_body_velocity[1] - self.last_u[1])
+        dwz = float(self.observed_body_velocity[2] - self.last_u[2])
+
+        # 不做低通，仅做死区+限幅，抑制小噪声和尖峰扰动。
+        if abs(dvx_body) < self.disturbance_deadband_lin:
+            dvx_body = 0.0
+        if abs(dvy_body) < self.disturbance_deadband_lin:
+            dvy_body = 0.0
+        if abs(dwz) < self.disturbance_deadband_yaw:
+            dwz = 0.0
+        dvx_body = float(np.clip(dvx_body, -self.disturbance_max_lin, self.disturbance_max_lin))
+        dvy_body = float(np.clip(dvy_body, -self.disturbance_max_lin, self.disturbance_max_lin))
+        dwz = float(np.clip(dwz, -self.disturbance_max_yaw, self.disturbance_max_yaw))
+
+        x_mpc_ext = np.array(
+            [[measured_x], [measured_y], [measured_theta], [dvx_body], [dvy_body], [dwz]],
+            dtype=float,
+        )
+
         # 新模型下 U 直接是速度 [vx, vy, vw]
         import asyncio
-        u=asyncio.run_coroutine_threadsafe(self.path_follwer.async_update(x_mpc), self.loop).result()  # 等待结果
+        u=asyncio.run_coroutine_threadsafe(self.path_follwer.async_update(x_mpc_ext), self.loop).result()  # 等待结果
         cmd_msg = Twist()
         cmd_msg.linear.x = u[0]
         cmd_msg.linear.y = u[1]
@@ -156,6 +186,7 @@ class MPCControlNode(Node):
             cmd_msg.angular.z=0.0  # 当线速度非常小时，直接将角速度设为0，避免不必要的旋转
         self.pub.publish(cmd_msg)
         self.mpc_speed_pub.publish(cmd_msg)
+        self.last_u = np.array([float(cmd_msg.linear.x), float(cmd_msg.linear.y), float(cmd_msg.angular.z)], dtype=float)
 
 def main():
     import rclpy
