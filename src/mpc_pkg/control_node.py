@@ -4,7 +4,7 @@ from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import Twist, PoseStamped
 import linear
 from mpc import MPCModel,MPCPathFollower
-from state_observer import PoseVelocityObserver
+from state_observer import PoseVelocityObserver,PoseVelocityESO
 class MPCControlNode(Node):
     def __init__(self):
         super().__init__('mpc_control_node')
@@ -47,6 +47,13 @@ class MPCControlNode(Node):
             reset_threshold_pos=0.5,
             reset_threshold_yaw=0.8,
         )
+        # self.state_observer=PoseVelocityESO(
+        #     omega_x = 15.0,   # x方向观测器带宽
+        #     omega_y = 15.0,   # y方向观测器带宽
+        #     omega_yaw = 15.0, # 航向角观测器带宽
+        #     reset_threshold_pos = 0.5,
+        #     reset_threshold_yaw = 0.8,
+        # )
         self.observed_body_velocity = np.zeros(3, dtype=float)
         # --- 新增：底层控制输出平滑（模拟物理电机的响应过程与惯性） ---
         self.last_u = np.array([0.0, 0.0, 0.0])
