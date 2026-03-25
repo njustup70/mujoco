@@ -126,12 +126,9 @@ class MPCPathFollower:
         self._step_count = 0
         # do-mpc 默认会持续记录运行历史，长时间运行会让 append/内存开销增长。
         self._history_reset_interval = 200
-        self.enable_foxglove_stream = True
-
         self.model = do_mpc.model.Model(model_type)
-
-        # State: [x, y, theta]
-        self.state = self.model.set_variable(var_type='_x', var_name='state', shape=(3, 1))
+        # State: [x, y, theta, dx, dy, dtheta] (6维扩张状态，后3维为扰动项)
+        self.state = self.model.set_variable(var_type='_x', var_name='state', shape=(6, 1))
         # Input:
         # - swerve: [v, alpha, vw]
         # - omni:   [vx_body, vy_body, vw]
@@ -139,17 +136,24 @@ class MPCPathFollower:
         ref = self.model.set_variable(var_type='_tvp', var_name='ref', shape=(3, 1))
 
         # --- 按底盘类型定义动力学 ---
-        theta = self.state[2]
+        # 提取原始状态与扰动项
+        x, y, theta = self.state[0], self.state[1], self.state[2]
+        dx, dy, dtheta = self.state[3], self.state[4], self.state[5]
+        
         if self.drive_type == 'swerve':
             v = self.u_vec[0]
             alpha = self.u_vec[1]
             vw = self.u_vec[2]
 
-            # 连续系统: x_dot = f(x,u)
-            x_dot = v * cos(theta + alpha)
-            y_dot = v * sin(theta + alpha)
-            theta_dot = vw
-            rhs_state = vertcat(x_dot, y_dot, theta_dot)
+            # 连续系统: x_dot = f(x,u) + 扰动项
+            x_dot = v * cos(theta + alpha) + dx
+            y_dot = v * sin(theta + alpha) + dy
+            theta_dot = vw + dtheta
+            # 扰动在预测域内认为是常数（衰减由观测器处理）
+            dx_dot = 0.0
+            dy_dot = 0.0
+            dtheta_dot = 0.0
+            rhs_state = vertcat(x_dot, y_dot, theta_dot, dx_dot, dy_dot, dtheta_dot)
 
             rterm = np.array([2.0, 5.0, 10.0])
             lower_u = np.array([[-3.0], [-np.pi], [-2.0]])
@@ -174,13 +178,23 @@ class MPCPathFollower:
             vy_body = self.u_vec[1]
             vw = self.u_vec[2]
 
-            # 离散系统: x(k+1) = f(x(k),u(k))
+            # 离散系统: x(k+1) = f(x(k),u(k)) + 扰动项
             vx_world = cos(theta) * vx_body - sin(theta) * vy_body
             vy_world = sin(theta) * vx_body + cos(theta) * vy_body
+            # 基本运动学 + 扰动（扰动在预测域内认为是常数）
+            x_next = x + self.dt * vx_world + dx
+            y_next = y + self.dt * vy_world + dy
+            theta_next = theta + self.dt * vw + dtheta
+            dx_next = dx
+            dy_next = dy
+            dtheta_next = dtheta
             rhs_state = vertcat(
-                self.state[0] + self.dt * vx_world,
-                self.state[1] + self.dt * vy_world,
-                self.state[2] + self.dt * vw,
+                x_next,
+                y_next,
+                theta_next,
+                dx_next,
+                dy_next,
+                dtheta_next,
             )
 
             rterm = np.array([50.0, 50.0, 50.0])
@@ -204,6 +218,8 @@ class MPCPathFollower:
         self.model.set_rhs('state', rhs_state)
         self.model.setup()
 
+        # 成本函数只考虑位置/角度误差，不直接惩罚扰动
+        # （扰动会通过其在动力学中的影响间接被优化）
         pos_err = casadi.sumsqr(self.state[0:2] - ref[0:2])
         # Use cosine yaw cost to avoid angle wrap jump at +-pi.
         # yaw_err = 1.0 - casadi.cos(self.state[2] - ref[2])
@@ -262,19 +278,34 @@ class MPCPathFollower:
             self.tvp_template['_tvp', k, 'ref'] =ref_k 
             # print(ref_k)
     def set_state_init(self, x0):
-        '''设置 MPC 的初始状态'''
-        self.mpc.x0 = x0
+        '''设置 MPC 初始状态：
+        - 输入 (3,1): 扰动默认置零
+        - 输入 (6,1): 直接使用外部传入扰动
+        '''
+        assert isinstance(x0, np.ndarray) and (x0.shape == (3, 1) or x0.shape == (6, 1)), "输入状态必须是 (3, 1) 或 (6, 1) 的 numpy 数组"
+        if x0.shape == (3, 1):
+            x0_expanded = np.array([[x0[0, 0]], [x0[1, 0]], [x0[2, 0]], [0.0], [0.0], [0.0]], dtype=float)
+        else:
+            x0_expanded = x0
+        self.mpc.x0 = x0_expanded
         self.mpc.set_initial_guess()
     @time_print(10)
     def update(self,x):
-        assert isinstance(x, np.ndarray) and x.shape == (3, 1)
-        '''根据当前状态 x 计算控制输入'''
+        '''根据当前状态 x 计算控制输入：
+        - 输入 (3,1): 扰动默认置零
+        - 输入 (6,1): 直接使用外部传入扰动
+        '''
+        assert isinstance(x, np.ndarray) and (x.shape == (3, 1) or x.shape == (6, 1)), "输入状态必须是 (3, 1) 或 (6, 1) 的 numpy 数组"
         self._step_count += 1
         if self._step_count % self._history_reset_interval == 0:
             self.mpc.reset_history()
 
         self._update_prediction_reference(x)
-        u = self.mpc.make_step(x)
+        if x.shape == (3, 1):
+            x_expanded = np.array([[x[0, 0]], [x[1, 0]], [x[2, 0]], [0.0], [0.0], [0.0]], dtype=float)
+        else:
+            x_expanded = x
+        u = self.mpc.make_step(x_expanded)
         #u是二维数组，形状为 (3, 1)，我们需要将其转换为一维数组
         # swerve 输出 [v, alpha, vw]，对外统一成 [vx_body, vy_body, vw]
         if self.drive_type == 'swerve':
