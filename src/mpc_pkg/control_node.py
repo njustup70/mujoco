@@ -59,11 +59,6 @@ class MPCControlNode(Node):
         # --- 新增：底层控制输出平滑（模拟物理电机的响应过程与惯性） ---
         self.last_u = np.array([0.0, 0.0, 0.0])
         self.lpf_alpha = 0.2  # 低通滤波系数(0.0~1.0)，越小底盘响应越柔和，舵轮转向过程越明显
-        # 扰动注入抑制参数（不做低通，仅做死区与限幅）
-        self.disturbance_deadband_lin = 0.05
-        self.disturbance_deadband_yaw = 0.03
-        self.disturbance_max_lin = 0.8
-        self.disturbance_max_yaw = 0.8
 
         import asyncio,threading
         self.loop=asyncio.new_event_loop()
@@ -72,11 +67,7 @@ class MPCControlNode(Node):
         self.thread.start()
         # asyncio.run_coroutine_threadsafe(test(), self.loop)
         # self.server=foxglove.start_server(port=8766)
-        self.filtered_disturbance = np.array([0.0, 0.0, 0.0])
-        # 滤波系数要小（0.05~0.1），强行滤掉加速时的动态滞后
-        self.dist_lpf_alpha = 0.05 
-        # 信任系数：不把算出的扰动100%喂给MPC，防止过补偿
-        self.dist_trust_ratio = 0.4
+
     def _yaw_to_quaternion(self, yaw: float):
         qz = float(np.sin(yaw * 0.5))
         qw = float(np.cos(yaw * 0.5))
@@ -150,42 +141,13 @@ class MPCControlNode(Node):
         if not self.initialized:
             self.control.mpc.x0 = x_mpc
             self.control.mpc.set_initial_guess()
-            x_mpc_ext = np.array(
-                [[measured_x], [measured_y], [measured_theta], [0.0], [0.0], [0.0]],
-                dtype=float,
-            )
-            self.path_follwer.set_state_init(x_mpc_ext)
+            self.path_follwer.set_state_init(x_mpc)
             self.initialized = True
             return
 
-        # 观测到的车体系速度与上一拍控制速度之差, 作为“等效扰动速度”。
-        # 1. 计算原始速度偏差 (包含真实扰动 + 动态滞后)
-        dvx_raw = float(self.observed_body_velocity[0] - self.last_u[0])
-        dvy_raw = float(self.observed_body_velocity[1] - self.last_u[1])
-        dwz_raw = float(self.observed_body_velocity[2] - self.last_u[2])
-
-        # 2. 核心：一阶低通滤波 (过滤掉高频的系统惯性和观测器滞后)
-        self.filtered_disturbance[0] += self.dist_lpf_alpha * (dvx_raw - self.filtered_disturbance[0])
-        self.filtered_disturbance[1] += self.dist_lpf_alpha * (dvy_raw - self.filtered_disturbance[1])
-        self.filtered_disturbance[2] += self.dist_lpf_alpha * (dwz_raw - self.filtered_disturbance[2])
-
-        # 3. 乘以信任系数并限幅 (不要死区)
-        dvx_body = self.filtered_disturbance[0] * self.dist_trust_ratio
-        dvy_body = self.filtered_disturbance[1] * self.dist_trust_ratio
-        dwz      = self.filtered_disturbance[2] * self.dist_trust_ratio
-
-        dvx_body = float(np.clip(dvx_body, -self.disturbance_max_lin, self.disturbance_max_lin))
-        dvy_body = float(np.clip(dvy_body, -self.disturbance_max_lin, self.disturbance_max_lin))
-        dwz      = float(np.clip(dwz, -self.disturbance_max_yaw, self.disturbance_max_yaw))
-
-        x_mpc_ext = np.array(
-            [[measured_x], [measured_y], [measured_theta], [dvx_body], [dvy_body], [dwz]],
-            dtype=float,
-        )
-
         # 新模型下 U 直接是速度 [vx, vy, vw]
         import asyncio
-        u=asyncio.run_coroutine_threadsafe(self.path_follwer.async_update(x_mpc_ext), self.loop).result()  # 等待结果
+        u=asyncio.run_coroutine_threadsafe(self.path_follwer.async_update(x_mpc), self.loop).result()  # 等待结果
         cmd_msg = Twist()
         cmd_msg.linear.x = u[0]
         cmd_msg.linear.y = u[1]
