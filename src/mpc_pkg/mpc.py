@@ -277,9 +277,6 @@ class MPCPathFollower:
         self._update_prediction_reference(x)
         u = self.mpc.make_step(x)
         #u是二维数组，形状为 (3, 1)，我们需要将其转换为一维数组
-        if self.enable_foxglove_stream:
-            foxgloveTools.foxgloveViusalInstance.send(u.flatten(), topic="/mpc/control_input")
-
         # swerve 输出 [v, alpha, vw]，对外统一成 [vx_body, vy_body, vw]
         if self.drive_type == 'swerve':
             vx_body = u[0] * cos(u[1])

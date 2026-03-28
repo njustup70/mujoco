@@ -1,6 +1,10 @@
 import foxglove
 from dataclasses import asdict, fields, is_dataclass
 from typing import Any, get_args, get_origin
+import numpy as np
+from nav_msgs.msg import Path
+from geometry_msgs.msg import PoseStamped
+from rclpy.node import Node
 
 
 class FoxgloveVisual:
@@ -232,4 +236,87 @@ imu_data = {
 }
 self.imu_channel.log(imu_data)
 '''
-foxgloveViusalInstance=FoxgloveVisual(port=8766)
+class PathVisual:
+    def __init__(self, node: Node, frame_id='base_link', max_len=2000, qos_depth: int = 10) -> None:
+        self.node = node
+        self.max_len = max_len
+        self.qos_depth = qos_depth
+        self.frame_id = frame_id
+        # 缓存 Path 对象，避免重复创建整个列表
+        self.path_cache = {}
+        # 每个 topic 一个 publisher，首次发送时懒创建
+        self._publishers = {}
+
+    def _get_publisher(self, topic: str):
+        if topic not in self._publishers:
+            self._publishers[topic] = self.node.create_publisher(Path, topic, self.qos_depth)
+        return self._publishers[topic]
+
+    def _point_to_pose(self, point, stamp, yaw: float | None = None) -> PoseStamped:
+        pose = PoseStamped()
+        pose.header.frame_id = self.frame_id
+        pose.header.stamp = stamp
+        pt = np.asarray(point)
+        pose.pose.position.x = float(pt[0])
+        pose.pose.position.y = float(pt[1])
+        pose.pose.position.z = float(pt[2]) if pt.size > 2 else 0.0
+        if yaw is None:
+            pose.pose.orientation.x = 0.0
+            pose.pose.orientation.y = 0.0
+            pose.pose.orientation.z = 0.0
+            pose.pose.orientation.w = 1.0
+        else:
+            pose.pose.orientation.x = 0.0
+            pose.pose.orientation.y = 0.0
+            pose.pose.orientation.z = float(np.sin(yaw * 0.5))
+            pose.pose.orientation.w = float(np.cos(yaw * 0.5))
+        return pose
+
+    def publish_points(self, topic: str, points: list[np.ndarray], yaws: list[float] | None = None):
+        # 批量发布路径点，适用于一次性发送多个点的场景。
+        path_msg = Path()
+        path_msg.header.frame_id = self.frame_id
+        path_msg.header.stamp = self.node.get_clock().now().to_msg()
+        for idx, point in enumerate(points):
+            yaw = None if yaws is None else float(yaws[idx])
+            pose = self._point_to_pose(point, path_msg.header.stamp, yaw=yaw)
+            assert isinstance(path_msg.poses, list)
+            path_msg.poses.append(pose)
+        poses = list(path_msg.poses)
+        if len(poses) > self.max_len:
+            poses = poses[-self.max_len:]
+        path_msg.poses = poses
+        self.path_cache[topic] = path_msg
+        publisher = self._get_publisher(topic)
+        publisher.publish(path_msg)
+
+    def add_point(self, topic: str, point, yaw: float | None = None):
+        """
+        优化后的路径更新：复用消息对象，仅追加新点
+        """
+        # 1. 初始化或获取缓存的消息对象
+        if topic not in self.path_cache:
+            path_msg = Path()
+            path_msg.header.frame_id = self.frame_id
+            self.path_cache[topic] = path_msg
+        
+        path_msg: Path = self.path_cache[topic]
+        
+        # 2. 限制长度：如果超过 max_len，移除最早的点 (O(1) 或 O(n) 操作)
+        if len(path_msg.poses) >= self.max_len:
+            #判断属性避免分析器报错
+            assert isinstance(path_msg.poses, list)
+            path_msg.poses.pop(0)
+
+        # 简化赋值，避免重复调用 get_clock().now()
+        now = self.node.get_clock().now().to_msg()
+        new_pose = self._point_to_pose(point, now, yaw=yaw)
+        
+        # 4. 追加并发布
+        assert isinstance(path_msg.poses, list)
+        path_msg.poses.append(new_pose)
+        path_msg.header.stamp = now
+
+        # 发布整条路径（注意：发布本身在大数组下仍有序列化开销，但计算开销已降至最低）
+        publisher = self._get_publisher(topic)
+        publisher.publish(path_msg)
