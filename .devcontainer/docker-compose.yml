@@ -17,6 +17,7 @@ services:
     runtime: "nvidia"
     tty: true
     network_mode: "host"
+    user: 'Elaina'
     privileged: true
     stdin_open: true
     entrypoint: [ '/bin/bash' ]

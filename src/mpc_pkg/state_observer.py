@@ -176,6 +176,11 @@ class PoseVelocityObserver:
         assert last_t is not None
 
         dt = now - last_t
+        # 仿真 reset 后时间戳可能回退，若不处理会导致 dt 长期为负并卡死在旧输出。
+        if dt <= 0.0:
+            self._reinitialize_with_measurement(z, now)
+            return np.zeros(3, dtype=float)
+
         # dt 过小时跳过滤波更新:
         # 这能避免数值病态(尤其是高频重复时间戳), 并复用上一次稳定估计值。
         if dt < self.min_dt:

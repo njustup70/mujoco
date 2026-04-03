@@ -2,6 +2,7 @@ import numpy as np
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Vector3Stamped
 import linear
 from mpc import MPCModel,MPCPathFollower
 import foxgloveTools
@@ -18,8 +19,8 @@ class MPCControlNode(Node):
             self.odom_callback,
             10)
         self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
-        self.mpc_speed_pub = self.create_publisher(Twist, '/mpc/control_input', 10)
-        self.observer_speed_pub = self.create_publisher(Twist, '/mpc/observed_velocity', 10)
+        self.cmd_state_pub = self.create_publisher(Vector3Stamped, '/state/cmd_vel', 10)
+        self.observer_state_pub = self.create_publisher(Vector3Stamped, '/state/observe_vel', 10)
         self.frame_id = 'odom'
         self.max_tracked_points = 2000
         self.path_visual = foxgloveTools.PathVisual(
@@ -97,11 +98,13 @@ class MPCControlNode(Node):
             measured_theta,
             stamp_sec=stamp_sec,
         )
-        obs_msg = Twist()
-        obs_msg.linear.x = float(self.observed_body_velocity[0])
-        obs_msg.linear.y = float(self.observed_body_velocity[1])
-        obs_msg.angular.z = float(self.observed_body_velocity[2])
-        self.observer_speed_pub.publish(obs_msg)
+        obs_msg = Vector3Stamped()
+        obs_msg.header.stamp = msg.header.stamp
+        obs_msg.header.frame_id = 'base_link'
+        obs_msg.vector.x = float(self.observed_body_velocity[0])
+        obs_msg.vector.y = float(self.observed_body_velocity[1])
+        obs_msg.vector.z = float(self.observed_body_velocity[2])
+        self.observer_state_pub.publish(obs_msg)
 
         self._append_tracked_pose(measured_x, measured_y, measured_theta)
 
@@ -125,8 +128,6 @@ class MPCControlNode(Node):
         if(u[0]**2+u[1]**2<1e-2):
             cmd_msg.angular.z=0.0  # 当线速度非常小时，直接将角速度设为0，避免不必要的旋转
         self.pub.publish(cmd_msg)
-        self.mpc_speed_pub.publish(cmd_msg)
-
 def main():
     import rclpy
     rclpy.init()
