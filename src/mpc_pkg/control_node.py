@@ -43,12 +43,10 @@ class MPCControlNode(Node):
         self.state_observer = PoseVelocityObserver(
             min_dt=1e-3,
             max_dt=0.2,
-            q_linear_acc=10.0,
-            q_yaw_acc=4.0,
             r_pos=5e-4,
             r_yaw=2.0e-4,
-            reset_threshold_pos=0.5,
-            reset_threshold_yaw=0.8,
+            reset_threshold_pos=1.0,
+            reset_threshold_yaw=2.0,
         )
         self.observed_body_velocity = np.zeros(3, dtype=float)
 
