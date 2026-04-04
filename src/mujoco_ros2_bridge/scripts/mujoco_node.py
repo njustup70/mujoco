@@ -63,8 +63,8 @@ class MujocoSimNode(Node):
         self.prev_test_time = None
         self.prev_test_pos = None
         
-        self.wheels_pos = [(0.25, 0.2), (0.25, -0.2), (-0.25, 0.2), (-0.25, -0.2)]
-        self.wheel_radius = 0.08
+        self.wheels_pos = [(0.325, 0.325), (0.325, -0.325), (-0.325, 0.325), (-0.325, -0.325)]
+        self.wheel_radius = 0.058
         
         # 舵关节在 qpos 中的下标（用于读取当前实际舵角）
         self.steer_qposadr = [
