@@ -237,7 +237,7 @@ imu_data = {
 self.imu_channel.log(imu_data)
 '''
 class PathVisual:
-    def __init__(self, node: Node, frame_id='base_link', max_len=2000, qos_depth: int = 10) -> None:
+    def __init__(self, node: Node, frame_id='base_link', max_len=20, qos_depth: int = 10) -> None:
         self.node = node
         self.max_len = max_len
         self.qos_depth = qos_depth

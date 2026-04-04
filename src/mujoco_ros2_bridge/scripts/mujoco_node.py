@@ -27,10 +27,10 @@ class MujocoSimNode(Node):
         self.wheel_steer_lag_alpha = 0.0
         self.wheel_drive_lag_alpha = 0.0
         self.noise_cfg = OdomNoiseConfig(
-            std_pos_100hz=0.02,
-            std_ori_100hz=0.02,
-            std_pos_10hz=0.01,
-            std_ori_10hz=0.01,
+            std_pos_100hz=0.0002,
+            std_ori_100hz=0.002,
+            std_pos_10hz=0.0001,
+            std_ori_10hz=0.001,
             std_vel=0.02,
         )
         self.noise_gen = OdomNoiseGenerator(self.noise_cfg)
@@ -54,11 +54,14 @@ class MujocoSimNode(Node):
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
         self.base_link_state_pub = self.create_publisher(Vector3Stamped, '/state/base_link', 10)
         self.real_vel_pub = self.create_publisher(Vector3Stamped, '/mujoco/real_vel', 10)
+        self.state_test_pub = self.create_publisher(Vector3Stamped, '/state/test', 10)
 
         # 3. 状态变量
         self.target_v_x = 0.0
         self.target_v_y = 0.0
         self.target_v_yaw = 0.0
+        self.prev_test_time = None
+        self.prev_test_pos = None
         
         self.wheels_pos = [(0.25, 0.2), (0.25, -0.2), (-0.25, 0.2), (-0.25, -0.2)]
         self.wheel_radius = 0.08
@@ -203,6 +206,31 @@ class MujocoSimNode(Node):
         base_link_state.vector.y = float(noisy_pos[1])
         base_link_state.vector.z = noisy_yaw
         self.base_link_state_pub.publish(base_link_state)
+
+        # 简单差分估计平面速度：v = sqrt(vx^2 + vy^2)
+        state_test_msg = Vector3Stamped()
+        state_test_msg.header.stamp = stamp_msg
+        state_test_msg.header.frame_id = 'odom'
+        now_t = float(self.data.time)
+        if self.prev_test_time is not None and self.prev_test_pos is not None:
+            dt = now_t - self.prev_test_time
+            if dt > 1e-9:
+                vx_diff = (float(noisy_pos[0]) - self.prev_test_pos[0]) / dt
+                vy_diff = (float(noisy_pos[1]) - self.prev_test_pos[1]) / dt
+                state_test_msg.vector.x = float(np.hypot(vx_diff, vy_diff))
+                state_test_msg.vector.y = vx_diff
+                state_test_msg.vector.z = vy_diff
+            else:
+                state_test_msg.vector.x = 0.0
+                state_test_msg.vector.y = 0.0
+                state_test_msg.vector.z = 0.0
+        else:
+            state_test_msg.vector.x = 0.0
+            state_test_msg.vector.y = 0.0
+            state_test_msg.vector.z = 0.0
+        self.state_test_pub.publish(state_test_msg)
+        self.prev_test_time = now_t
+        self.prev_test_pos = (float(noisy_pos[0]), float(noisy_pos[1]))
 
         real_vel_msg = Vector3Stamped()
         real_vel_msg.header.stamp = stamp_msg

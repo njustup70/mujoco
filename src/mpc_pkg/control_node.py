@@ -6,7 +6,7 @@ from geometry_msgs.msg import Vector3Stamped
 import linear
 from mpc import MPCModel,MPCPathFollower
 import foxgloveTools
-from state_observer import PoseVelocityObserver
+from state_observer import PoseVelocityObserver,PoseVelocityESO
 
 class MPCControlNode(Node):
     def __init__(self):
@@ -17,7 +17,7 @@ class MPCControlNode(Node):
             Odometry,
             'odom',
             self.odom_callback,
-            10)
+            0)
         self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
         self.cmd_state_pub = self.create_publisher(Vector3Stamped, '/state/cmd_vel', 10)
         self.observer_state_pub = self.create_publisher(Vector3Stamped, '/state/observe_vel', 10)
@@ -43,13 +43,14 @@ class MPCControlNode(Node):
         self.state_observer = PoseVelocityObserver(
             min_dt=1e-3,
             max_dt=0.2,
-            q_linear_acc=10.0,
+            q_linear_acc=20.0,
             q_yaw_acc=4.0,
-            r_pos=5e-4,
+            r_pos=1e-5,
             r_yaw=2.0e-4,
             reset_threshold_pos=0.5,
             reset_threshold_yaw=0.8,
         )
+        # self.state_observer=PoseVelocityESO()
         self.observed_body_velocity = np.zeros(3, dtype=float)
 
         # --- 新增：底层控制输出平滑（模拟物理电机的响应过程与惯性） ---
@@ -79,7 +80,8 @@ class MPCControlNode(Node):
             np.array([measured_x, measured_y, 0.0], dtype=float),
             yaw=float(measured_theta),
         )
-        
+    from decorder import time_print
+    # @time_print(10)
     def odom_callback(self, msg: Odometry):
         # 从 Odometry 消息中提取测量值
         measured_x = msg.pose.pose.position.x
