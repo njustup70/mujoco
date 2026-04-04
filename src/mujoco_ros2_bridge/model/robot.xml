@@ -17,9 +17,13 @@
 
         <body name="chassis" pos="0 0 0.209" euler="0 0 0">
             <freejoint name="root"/>
-            <geom type="box" size="0.35 0.25 0.04" pos="0.18 0.057 0.0" rgba="0.8 0.3 0.3 1" mass="16"/>
-
-            <!-- Wheel 0: Front Left -->
+            
+            <geom name="chassis_visual_main" type="box" size="0.4 0.4 0.08" pos="0 0 -0.0" rgba="0.8 0.3 0.3 1" contype="0" conaffinity="0" mass="0"/>
+            <!-- <geom name="chassis_visual_top" type="box" size="0.38 0.38 0.01" pos="0 0 0.06" rgba="0.6 0.2 0.2 1" contype="0" conaffinity="0" mass="0"/> -->
+            
+            <!-- <geom name="chassis_visual_center" type="box" size="0.4 0.4 0.04" pos="-0.02 0 0" rgba="0.8 0.3 0.3 1" contype="0" conaffinity="0" mass="0"/> -->
+            <!-- <geom name="chassis_visual_rear" type="box" size="0.16 0.14 0.03" pos="-0.18 0 0.04" rgba="0.8 0.3 0.3 1" contype="0" conaffinity="0" mass="0"/> -->
+            <geom name="chassis_mass" type="box" size="0.35 0.25 0.04" pos="0.18 0.057 0.0" rgba="0.8 0.3 0.3 0" mass="16" contype="0" conaffinity="0"/>
             <body name="wheel0_pivot" pos="0.325 0.325 -0.093">
                 <joint name="wheel0_steer" type="hinge" axis="0 0 1" damping="2.0" armature="0.01"/>
                 <geom type="cylinder" size="0.04 0.02" rgba="0.3 0.3 0.8 1" mass="0.5" contype="0" conaffinity="0"/>
@@ -29,7 +33,6 @@
                 </body>
             </body>
 
-            <!-- Wheel 1: Front Right -->
             <body name="wheel1_pivot" pos="0.325 -0.325 -0.093">
                 <joint name="wheel1_steer" type="hinge" axis="0 0 1" damping="2.0" armature="0.01"/>
                 <geom type="cylinder" size="0.04 0.02" rgba="0.3 0.3 0.8 1" mass="0.5" contype="0" conaffinity="0"/>
@@ -39,7 +42,6 @@
                 </body>
             </body>
 
-            <!-- Wheel 2: Rear Left -->
             <body name="wheel2_pivot" pos="-0.325 0.325 -0.093">
                 <joint name="wheel2_steer" type="hinge" axis="0 0 1" damping="2.0" armature="0.01"/>
                 <geom type="cylinder" size="0.04 0.02" rgba="0.3 0.3 0.8 1" mass="0.5" contype="0" conaffinity="0"/>
@@ -49,7 +51,6 @@
                 </body>
             </body>
 
-            <!-- Wheel 3: Rear Right -->
             <body name="wheel3_pivot" pos="-0.325 -0.325 -0.093">
                 <joint name="wheel3_steer" type="hinge" axis="0 0 1" damping="2.0" armature="0.01"/>
                 <geom type="cylinder" size="0.04 0.02" rgba="0.3 0.3 0.8 1" mass="0.5" contype="0" conaffinity="0"/>
@@ -59,10 +60,9 @@
                 </body>
             </body>
 
-            <geom name="head_marker" type="box" size="0.05 0.2 0.01" pos="0.18 0 0.055" rgba="0 1 0 1" contype="0" conaffinity="0" mass="0"/>
+            <geom name="head_marker" type="box" size="0.05 0.2 0.01" pos="0.18 0 0.07" rgba="0 1 0 1" contype="0" conaffinity="0" mass="0"/>
         </body>
     </worldbody>
-
     <actuator>
         <position joint="wheel0_steer" name="steer0" kp="50" forcerange="-300 300"/>
         <velocity joint="wheel0_drive" name="drive0" kv="40" forcerange="-180 180"/>
