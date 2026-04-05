@@ -3,8 +3,10 @@ from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
 from geometry_msgs.msg import Vector3Stamped
+from std_msgs.msg import Float64MultiArray
 import linear
-from mpc import MPCModel, MPCPathFollower, DynamicMPCPathFollower
+from mpc import MPCModel, MPCPathFollower, DynamicMPCPathFollower, ChessicModel
+from ForceResolution import ServeForceAllocator
 import foxgloveTools
 from state_observer import PoseVelocityObserver,PoseVelocityESO
 
@@ -19,6 +21,7 @@ class MPCControlNode(Node):
             self.odom_callback,
             0)
         self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.wheel_cmd_pub = self.create_publisher(Float64MultiArray, '/mujoco/wheel_cmd', 10)
         self.cmd_state_pub = self.create_publisher(Vector3Stamped, '/state/cmd_vel', 10)
         self.observer_state_pub = self.create_publisher(Vector3Stamped, '/state/observe_vel', 10)
         self.frame_id = 'odom'
@@ -32,7 +35,10 @@ class MPCControlNode(Node):
         self.tracked_path_topic = '/mpc/tracked_path'
         # self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
         self.path_follwer=MPCPathFollower(0.1,type='swerve')
-        self.force_path_follower = DynamicMPCPathFollower(0.1)
+        self.chessic_model = ChessicModel()
+        self.force_path_follower = DynamicMPCPathFollower(0.1, chessic_model=self.chessic_model)
+        self.force_allocator = ServeForceAllocator(chessic_model=self.chessic_model)
+        self.current_steer_angles = np.zeros(4, dtype=float)
         self.cube=linear.SplinePlanner()
         # 生成一条简单的路径
         target_points = np.array([[0, 0], [2, 4]])
@@ -145,11 +151,25 @@ class MPCControlNode(Node):
         # 力控 MPC 输出 U 是力矩 [Fx, Fy, Mz]
         import asyncio
         u = asyncio.run_coroutine_threadsafe(self.force_path_follower.async_update(x_force), self.loop).result()
+        alloc = self.force_allocator.get_allocation(u, self.current_steer_angles)
+        self.current_steer_angles = np.array(alloc['drive_angles'], dtype=float)
         self._log_counter += 1
         if self._log_counter % 10 == 0:
             self.get_logger().info(
                 f"force_mpc u: Fx={float(u[0]):.3f}, Fy={float(u[1]):.3f}, Mz={float(u[2]):.3f}"
             )
+            self.get_logger().info(
+                "allocator drive_forces="
+                f"{np.array2string(np.array(alloc['drive_forces']), precision=3)} "
+                "drive_angles="
+                f"{np.array2string(np.array(alloc['drive_angles']), precision=3)} "
+                "steer_torques="
+                f"{np.array2string(np.array(alloc['steer_torques']), precision=3)}"
+            )
+
+        wheel_msg = Float64MultiArray()
+        wheel_msg.data = [float(v) for v in alloc['drive_angles']] + [float(v) for v in alloc['drive_forces']]
+        # self.wheel_cmd_pub.publish(wheel_msg)
 
         cmd_state_msg = Vector3Stamped()
         cmd_state_msg.header.stamp = msg.header.stamp

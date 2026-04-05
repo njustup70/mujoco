@@ -65,12 +65,12 @@
     </worldbody>
     <actuator>
         <position joint="wheel0_steer" name="steer0" kp="50" forcerange="-300 300"/>
-        <velocity joint="wheel0_drive" name="drive0" kv="40" forcerange="-180 180"/>
+        <motor joint="wheel0_drive" name="drive0" gear="1" forcerange="-180 180"/>
         <position joint="wheel1_steer" name="steer1" kp="50" forcerange="-300 300"/>
-        <velocity joint="wheel1_drive" name="drive1" kv="40" forcerange="-180 180"/>
+        <motor joint="wheel1_drive" name="drive1" gear="1" forcerange="-180 180"/>
         <position joint="wheel2_steer" name="steer2" kp="50" forcerange="-300 300"/>
-        <velocity joint="wheel2_drive" name="drive2" kv="40" forcerange="-180 180"/>
+        <motor joint="wheel2_drive" name="drive2" gear="1" forcerange="-180 180"/>
         <position joint="wheel3_steer" name="steer3" kp="50" forcerange="-300 300"/>
-        <velocity joint="wheel3_drive" name="drive3" kv="40" forcerange="-180 180"/>
+        <motor joint="wheel3_drive" name="drive3" gear="1" forcerange="-180 180"/>
     </actuator>
 </mujoco>

@@ -9,6 +9,30 @@ from decorder import time_print
 import asyncio
 from linear import SplinePlanner
 import foxgloveTools
+
+
+class ChessicModel:
+    def __init__(
+        self,
+        mass=50.0,
+        iz=5.0,
+        h_cg=0.15,
+        dx_cg=0.05,
+        dy_cg=0.02,
+        wheel_base=0.4,
+        wheel_width=0.4,
+        mu=0.8,
+        g=9.81,
+    ):
+        self.mass = float(mass)
+        self.iz = float(iz)
+        self.h_cg = float(h_cg)
+        self.dx_cg = float(dx_cg)
+        self.dy_cg = float(dy_cg)
+        self.L = float(wheel_base)
+        self.W = float(wheel_width)
+        self.mu = float(mu)
+        self.g = float(g)
 '''
 位置闭环mpc,不会追踪路径点。
 '''
@@ -299,24 +323,25 @@ class MPCPathFollower:
         u= await loop.run_in_executor(self.pool, self.update, x)
         return u
 class DynamicMPCPathFollower:
-    def __init__(self, dt, mass=50.0, iz=5.0, h_cg=0.15, 
-                 dx_cg=0.05, dy_cg=0.02, # 质心相对于几何中心的偏移
-                 wheel_base=0.4, wheel_width=0.4, mu=0.8):
-        
+    def __init__(self, dt, chessic_model=None):
+        if chessic_model is None:
+            chessic_model = ChessicModel()
+        self.chessic_model = chessic_model
+
         # --- 物理参数 ---
-        self.mass = float(mass) #车辆总质量
-        self.iz = float(iz) #绕垂直轴的转动惯量
-        self.h_cg = float(h_cg) #质心高度 (影响载荷转移)
-        self.dx_cg = float(dx_cg)  # 纵向偏移 (前+)
-        self.dy_cg = float(dy_cg)  # 横向偏移 (左+)
-        self.L = float(wheel_base) #轴距
-        self.W = float(wheel_width) #轮距
-        self.mu = float(mu) #摩擦系数
-        self.g = 9.81
+        self.mass = self.chessic_model.mass
+        self.iz = self.chessic_model.iz
+        self.h_cg = self.chessic_model.h_cg
+        self.dx_cg = self.chessic_model.dx_cg
+        self.dy_cg = self.chessic_model.dy_cg
+        self.L = self.chessic_model.L
+        self.W = self.chessic_model.W
+        self.mu = self.chessic_model.mu
+        self.g = self.chessic_model.g
 
         # --- 配置 ---
         self.dt = float(dt)
-        self.n_horizon = 20
+        self.n_horizon = 10
         self.model_type = 'continuous'
         
         # --- 状态与路径规划 ---

@@ -3,6 +3,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, TransformStamped
 from geometry_msgs.msg import Vector3Stamped
+from std_msgs.msg import Float64MultiArray
 from nav_msgs.msg import Odometry
 import tf2_ros
 import mujoco
@@ -15,6 +16,33 @@ from builtin_interfaces.msg import Time as TimeMsg
 from ament_index_python.packages import get_package_share_directory
 from odom_noise_node import OdomNoiseConfig, OdomNoiseGenerator
 from swerve_solver import SwerveSolver
+
+
+class WheelTorquePositionController:
+    """解析并缓存轮控数组指令: [steer0..3, drive_torque0..3]。"""
+
+    def __init__(self, steer_count=4, drive_count=4):
+        self.steer_count = int(steer_count)
+        self.drive_count = int(drive_count)
+        self.expected_len = self.steer_count + self.drive_count
+        self.steer_targets = [0.0] * self.steer_count
+        self.drive_torques = [0.0] * self.drive_count
+        self.has_command = False
+        self.last_update_time = 0.0
+
+    def update_from_array(self, values, now_sec):
+        if len(values) < self.expected_len:
+            return False
+        self.steer_targets = [float(v) for v in values[:self.steer_count]]
+        self.drive_torques = [float(v) for v in values[self.steer_count:self.expected_len]]
+        self.has_command = True
+        self.last_update_time = float(now_sec)
+        return True
+
+    def command_fresh(self, now_sec, timeout_sec):
+        if not self.has_command:
+            return False
+        return (float(now_sec) - self.last_update_time) <= float(timeout_sec)
 
 class MujocoSimNode(Node):
     def __init__(self):
@@ -49,6 +77,7 @@ class MujocoSimNode(Node):
 
         # 2. 通讯组件
         self.cmd_vel_sub = self.create_subscription(Twist, 'cmd_vel', self.cmd_vel_callback, 10)
+        self.wheel_cmd_sub = self.create_subscription(Float64MultiArray, '/mujoco/wheel_cmd', self.wheel_cmd_callback, 10)
         # 发布带噪声里程计与 TF
         self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
@@ -62,6 +91,8 @@ class MujocoSimNode(Node):
         self.target_v_yaw = 0.0
         self.prev_test_time = None
         self.prev_test_pos = None
+        self.array_cmd_timeout_sec = 0.2
+        self.wheel_controller = WheelTorquePositionController(steer_count=4, drive_count=4)
         
         self.wheels_pos = [(0.325, 0.325), (0.325, -0.325), (-0.325, 0.325), (-0.325, -0.325)]
         self.wheel_radius = 0.058
@@ -108,6 +139,14 @@ class MujocoSimNode(Node):
         self.target_v_y = msg.linear.y
         self.target_v_yaw = msg.angular.z
 
+    def wheel_cmd_callback(self, msg: Float64MultiArray):
+        ok = self.wheel_controller.update_from_array(msg.data, float(self.data.time))
+        if not ok:
+            self.get_logger().warn(
+                f"/mujoco/wheel_cmd length invalid: got {len(msg.data)}, need {self.wheel_controller.expected_len}",
+                throttle_duration_sec=2.0,
+            )
+
     def simulation_loop(self):
         viewer = None
         
@@ -129,21 +168,29 @@ class MujocoSimNode(Node):
             step_start = time.time()
             
             # 1. 舵轮运动解算：根据速度指令得到目标舵角和速度
-            target_steer_list, target_drive_list = zip(*self.swerve_solver.solve(
-                self.target_v_x,
-                self.target_v_y,
-                self.target_v_yaw,
-            ))
+            use_wheel_array_cmd = self.wheel_controller.command_fresh(float(self.data.time), self.array_cmd_timeout_sec)
+
+            if use_wheel_array_cmd:
+                target_steer_list = list(self.wheel_controller.steer_targets)
+                target_drive_torque_list = list(self.wheel_controller.drive_torques)
+                motor_commands = list(zip(target_steer_list, target_drive_torque_list))
+            else:
+                target_steer_list, target_drive_list = zip(*self.swerve_solver.solve(
+                    self.target_v_x,
+                    self.target_v_y,
+                    self.target_v_yaw,
+                ))
             
             # 2. 读取当前实际舵角
             current_steer_angles = [self.data.qpos[self.steer_qposadr[i]] for i in range(4)]
-            
-            # 3. 应用电机动力学：一阶滞后 + 响应噪声
-            motor_commands = self.swerve_solver.apply_motor_dynamics(
-                list(target_steer_list),
-                list(target_drive_list),
-                current_steer_angles
-            )
+
+            # 3. 速度模式下应用电机动力学；数组轮控模式直接下发位置+力矩
+            if not use_wheel_array_cmd:
+                motor_commands = self.swerve_solver.apply_motor_dynamics(
+                    list(target_steer_list),
+                    list(target_drive_list),
+                    current_steer_angles
+                )
             
             # 4. 下达电机指令
             for i, (steer_ctrl, drive_ctrl) in enumerate(motor_commands):
