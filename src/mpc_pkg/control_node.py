@@ -52,7 +52,7 @@ class MPCControlNode(Node):
         self.tracked_path_topic = '/mpc/tracked_path'
         # self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
         self.path_follwer=MPCPathFollower(dt=0.2)
-        self.force_path_follower = AccMPCPathFollower(0.1, **self.sim_mpc_cfg)
+        self.force_path_follower = AccMPCPathFollower(0.05, **self.sim_mpc_cfg)
         self.cube=linear.SplinePlanner()
         # 生成一条简单的路径
         target_points = np.array([[0, 0], [2, 4]])

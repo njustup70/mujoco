@@ -4,3 +4,5 @@ build/
 *.TXT
 *.pyc
 result.json
+c_generated_code/
+acados_ocp.json
