@@ -298,3 +298,179 @@ class MPCPathFollower:
         loop = asyncio.get_event_loop()
         u= await loop.run_in_executor(self.pool, self.update, x)
         return u
+class DynamicMPCPathFollower:
+    def __init__(self, dt, mass=50.0, iz=5.0, h_cg=0.15, 
+                 dx_cg=0.05, dy_cg=0.02, # 质心相对于几何中心的偏移
+                 wheel_base=0.4, wheel_width=0.4, mu=0.8):
+        
+        # --- 物理参数 ---
+        self.mass = float(mass) #车辆总质量
+        self.iz = float(iz) #绕垂直轴的转动惯量
+        self.h_cg = float(h_cg) #质心高度 (影响载荷转移)
+        self.dx_cg = float(dx_cg)  # 纵向偏移 (前+)
+        self.dy_cg = float(dy_cg)  # 横向偏移 (左+)
+        self.L = float(wheel_base) #轴距
+        self.W = float(wheel_width) #轮距
+        self.mu = float(mu) #摩擦系数
+        self.g = 9.81
+
+        # --- 配置 ---
+        self.dt = float(dt)
+        self.n_horizon = 20
+        self.model_type = 'continuous'
+        
+        # --- 状态与路径规划 ---
+        self.path_planner = SplinePlanner() 
+        self.is_following_path = False
+        self.ref_speed = 1.0
+        self.end_point = np.array([0.0, 0.0, 0.0]) # x, y, theta
+        self._step_count = 0
+        self._history_reset_interval = 200
+
+        # --- 模型定义 ---
+        self.model = do_mpc.model.Model(self.model_type)
+
+        # 状态: [x, y, theta, vx, vy, omega] (均基于质心)
+        self.state = self.model.set_variable(var_type='_x', var_name='state', shape=(6, 1))
+        # 输入: [Fx, Fy, Mz] (作用于质心)
+        self.u_force = self.model.set_variable(var_type='_u', var_name='u_force', shape=(3, 1))
+        # 参考: [x_ref, y_ref, theta_ref]
+        ref = self.model.set_variable(var_type='_tvp', var_name='ref', shape=(3, 1))
+
+        # --- 动力学方程 (考虑质心系) ---
+        theta = self.state[2]
+        vx = self.state[3]
+        vy = self.state[4]
+        omega = self.state[5]
+
+        Fx = self.u_force[0]
+        Fy = self.u_force[1]
+        Mz = self.u_force[2]
+
+        # 1. 运动学 (基于质心速度推导世界坐标系变化)
+        dx = vx * cos(theta) - vy * sin(theta)
+        dy = vx * sin(theta) + vy * cos(theta)
+        dtheta = omega
+
+        # 2. 动力学 (Newton-Euler)
+        # 虽然质心偏移，但 F=ma 在质心系下依然成立
+        dvx = Fx / self.mass + vy * omega
+        dvy = Fy / self.mass - vx * omega
+        domega = Mz / self.iz
+
+        rhs_state = vertcat(dx, dy, dtheta, dvx, dvy, domega)
+        assert isinstance(rhs_state, casadi.SX)
+        self.model.set_rhs('state', rhs_state)
+        self.model.setup()
+
+        # --- 代价函数 (不包含速度误差) ---
+        pos_err = casadi.sumsqr(self.state[0:2] - ref[0:2])
+        angle_diff = self.state[2] - ref[2]
+        wrapped_angle_diff = casadi.atan2(sin(angle_diff), cos(angle_diff))
+        yaw_err = casadi.sumsqr(wrapped_angle_diff)
+
+        # 仅优化位置和角度，让 MPC 自动决定 vx, vy 来达成目标
+        self.lterm = 8.0 * pos_err + 2.0 * yaw_err
+        self.mterm = 12.0 * pos_err + 5.0 * yaw_err
+
+        # --- 在定义 MPC 控制器之后，setup 之前修改 ---
+        self.mpc = do_mpc.controller.MPC(self.model)
+
+        # 1. 明确获取 MPC 层级的控制变量符号 (非常重要)
+        u = self.mpc.model.u
+        Fx_sym = u['u_force', 0]
+        Fy_sym = u['u_force', 1]
+
+        # 2. 计算加速度符号
+        ax_sym = Fx_sym / self.mass
+        ay_sym = Fy_sym / self.mass
+
+        # 3. 重新设置非线性约束
+        # 摩擦圆
+        # self.mpc.set_nl_cons('friction_circle', (Fx_sym**2 + Fy_sym**2), (self.mu * self.mass * self.g)**2)
+
+        # 防翻转约束 (确保右侧是计算好的常数)
+        limit_x = float(self.g * self.L / 2.0)
+        limit_y = float(self.g * self.W / 2.0)
+
+        # 注意：do_mpc 的 fabs 建议使用 casadi.fabs
+        self.mpc.set_nl_cons('no_tip_over_x', casadi.fabs(ax_sym * self.h_cg), limit_x)
+        self.mpc.set_nl_cons('no_tip_over_y', casadi.fabs(ay_sym * self.h_cg), limit_y)
+        # --- MPC 运行参数 ---
+        set_up_settings = {
+            'n_horizon': self.n_horizon,
+            't_step': self.dt,
+            'state_discretization': 'collocation',
+            'store_full_solution': False,
+            'nlpsol_opts': {
+                'ipopt.print_level': 0,
+                'print_time': False,
+                'ipopt.max_iter': 40,
+                'ipopt.linear_solver': 'mumps',
+            },
+        }
+        self.mpc.set_param(**set_up_settings)
+        
+        # 这里的 Bounds 是虚拟力的物理极限
+        self.mpc.bounds['lower', '_u', 'u_force'] = np.array([[-400.0], [-400.0], [-150.0]])
+        self.mpc.bounds['upper', '_u', 'u_force'] = np.array([[400.0], [400.0], [150.0]])
+
+        self.mpc.set_objective(mterm=self.mterm, lterm=self.lterm)
+        self.tvp_template = self.mpc.get_tvp_template()
+        self.mpc.set_tvp_fun(lambda _t: self.tvp_template)
+        self.mpc.setup()
+        
+        from concurrent.futures import ThreadPoolExecutor
+        self.pool = ThreadPoolExecutor(max_workers=1)
+
+    def set_path(self, target_points: np.ndarray, target_yaw: float, ref_speed=None):
+        self.is_following_path = True
+        x_pts = target_points[:, 0]
+        y_pts = target_points[:, 1]
+        self.path_planner.generate_path(x_pts, y_pts, step_cm=10.0)
+        self.end_point = np.array([float(x_pts[-1]), float(y_pts[-1]), float(target_yaw)])
+        if ref_speed is not None:
+            self.ref_speed = float(ref_speed)
+
+    def _update_prediction_reference(self, x: np.ndarray):
+        if not self.is_following_path:
+            return
+        
+        # 根据质心当前位置查找最近点
+        self.s = self.path_planner.get_nearest_s(float(x[0, 0]), float(x[1, 0]))
+        
+        for k in range(self.n_horizon + 1):
+            # 这里的 s 前进依然参考 ref_speed，但 MPC 并没有速度误差代价
+            # 这意味着 ref_speed 只是决定了“参考点”在路径上的演进速度
+            s_k = self.s + self.ref_speed * self.dt * k
+            ref_k_pos = self.path_planner.get_state_by_s(s_k)
+            
+            # 参考值: [x, y, theta]
+            self.tvp_template['_tvp', k, 'ref'] = np.array([ref_k_pos[0], ref_k_pos[1], self.end_point[2]])
+
+    def set_state_init(self, x0):
+        """x0: [x, y, theta, vx, vy, omega]"""
+        self.mpc.x0 = x0
+        self.mpc.set_initial_guess()
+
+    def update(self, x):
+        assert x.shape == (6, 1)
+        self._step_count += 1
+        if self._step_count % self._history_reset_interval == 0:
+            self.mpc.reset_history()
+
+        self._update_prediction_reference(x)
+        u = self.mpc.make_step(x)
+        return u.flatten() # 返回 [Fx, Fy, Mz]
+
+    def set_target_point(self, target: np.ndarray):
+        """target: [x, y, theta]"""
+        self.is_following_path = False
+        self.end_point = target
+        for k in range(self.n_horizon + 1):
+            self.tvp_template['_tvp', k, 'ref'] = target
+    @time_print(10)
+    async def async_update(self, x):
+        import asyncio
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self.pool, self.update, x)

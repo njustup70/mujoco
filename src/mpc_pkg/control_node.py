@@ -4,7 +4,7 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
 from geometry_msgs.msg import Vector3Stamped
 import linear
-from mpc import MPCModel,MPCPathFollower
+from mpc import MPCModel, MPCPathFollower, DynamicMPCPathFollower
 import foxgloveTools
 from state_observer import PoseVelocityObserver,PoseVelocityESO
 
@@ -32,14 +32,18 @@ class MPCControlNode(Node):
         self.tracked_path_topic = '/mpc/tracked_path'
         # self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
         self.path_follwer=MPCPathFollower(0.1,type='swerve')
+        self.force_path_follower = DynamicMPCPathFollower(0.1)
         self.cube=linear.SplinePlanner()
         # 生成一条简单的路径
         target_points = np.array([[0, 0], [2, 4]])
         # self.cube.generate_path(x_pts, y_pts, step_cm=10.0)
         self.path_follwer.set_path(target_points, target_yaw=2.0, ref_speed=2.0)
+        self.force_path_follower.set_path(target_points, target_yaw=2.0, ref_speed=2.0)
         self._publish_reference_path_once()
         self.ref_path_timer = self.create_timer(0.5, self._publish_reference_path_once)
         self.initialized = False
+        self.publish_to_sim = False
+        self._log_counter = 0
         self.state_observer = PoseVelocityObserver(
             min_dt=1e-3,
             max_dt=0.2,
@@ -116,18 +120,54 @@ class MPCControlNode(Node):
             self.control.mpc.x0 = x_mpc
             self.control.mpc.set_initial_guess()
             self.path_follwer.set_state_init(x_mpc)
+            x_force_init = np.array([
+                [measured_x],
+                [measured_y],
+                [measured_theta],
+                [self.observed_body_velocity[0]],
+                [self.observed_body_velocity[1]],
+                [self.observed_body_velocity[2]],
+            ], dtype=float)
+            self.force_path_follower.set_state_init(x_force_init)
             self.initialized = True
             return
 
-        # 新模型下 U 直接是速度 [vx, vy, vw]
+        # 力控 MPC 状态: [x, y, theta, vx_body, vy_body, omega]
+        x_force = np.array([
+            [measured_x],
+            [measured_y],
+            [measured_theta],
+            [self.observed_body_velocity[0]],
+            [self.observed_body_velocity[1]],
+            [self.observed_body_velocity[2]],
+        ], dtype=float)
+
+        # 力控 MPC 输出 U 是力矩 [Fx, Fy, Mz]
         import asyncio
-        u=asyncio.run_coroutine_threadsafe(self.path_follwer.async_update(x_mpc), self.loop).result()  # 等待结果
+        u = asyncio.run_coroutine_threadsafe(self.force_path_follower.async_update(x_force), self.loop).result()
+        self._log_counter += 1
+        if self._log_counter % 10 == 0:
+            self.get_logger().info(
+                f"force_mpc u: Fx={float(u[0]):.3f}, Fy={float(u[1]):.3f}, Mz={float(u[2]):.3f}"
+            )
+
+        cmd_state_msg = Vector3Stamped()
+        cmd_state_msg.header.stamp = msg.header.stamp
+        cmd_state_msg.header.frame_id = 'base_link'
+        cmd_state_msg.vector.x = float(u[0])
+        cmd_state_msg.vector.y = float(u[1])
+        cmd_state_msg.vector.z = float(u[2])
+        self.cmd_state_pub.publish(cmd_state_msg)
+
+        if not self.publish_to_sim:
+            return
+
+        # 仅在显式开启时才发布到仿真，默认关闭
         cmd_msg = Twist()
         cmd_msg.linear.x = u[0]
         cmd_msg.linear.y = u[1]
         cmd_msg.angular.z = u[2]
-        # 发布控制命令
-        if(u[0]**2+u[1]**2<1e-2):
+        if (u[0]**2 + u[1]**2 < 1e-2):
             cmd_msg.angular.z=0.0  # 当线速度非常小时，直接将角速度设为0，避免不必要的旋转
         self.pub.publish(cmd_msg)
 def main():
