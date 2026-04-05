@@ -52,7 +52,7 @@ class MPCControlNode(Node):
         self.tracked_path_topic = '/mpc/tracked_path'
         # self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
         self.path_follwer=MPCPathFollower(dt=0.2)
-        self.force_path_follower = AccMPCPathFollower(0.05, **self.sim_mpc_cfg)
+        self.force_path_follower = AccMPCPathFollower(0.05)
         self.cube=linear.SplinePlanner()
         # 生成一条简单的路径
         target_points = np.array([[0, 0], [2, 4]])
@@ -167,7 +167,7 @@ class MPCControlNode(Node):
 
         # AccMPC 输出 U 是加速度 [ax, ay, alpha]
         import asyncio
-        v_cmd = asyncio.run_coroutine_threadsafe(self.force_path_follower.async_update(x_force), self.loop).result()
+        v_cmd = self.force_path_follower.update(x_force.flatten())
         cmd_state_msg = Vector3Stamped()
         cmd_state_msg.header.stamp = msg.header.stamp
         cmd_state_msg.header.frame_id = 'base_link'
@@ -175,13 +175,6 @@ class MPCControlNode(Node):
         cmd_state_msg.vector.y = float(v_cmd[1])
         cmd_state_msg.vector.z = float(v_cmd[2])
         self.cmd_state_pub.publish(cmd_state_msg)
-
-        self._log_counter += 1
-        if self._log_counter % 10 == 0:
-            self.get_logger().info(
-                f"acc_mpc v_cmd: vx={float(v_cmd[0]):.3f}, vy={float(v_cmd[1]):.3f}, omega={float(v_cmd[2]):.3f}"
-            )
-
         if not self.publish_to_sim:
             return
 
