@@ -8,7 +8,7 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=all
       - OMP_WAIT_POLICY=passive
       - TERM=xterm-256color
-      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - RMW_IMPLEMENTATION=rmw_zenoh_cpp
       - ROS_LOCALHOST_ONLY=1
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix
@@ -20,5 +20,16 @@ services:
     user: 'Elaina'
     privileged: true
     stdin_open: true
-    entrypoint: [ '/bin/bash' ]
+    entrypoint:
+      - /bin/bash
+      - -i
+      - -c
+      - |
+        if pgrep -x 'rmw_zenohd' >/dev/null; then
+          echo '[zenoh] rmw_zenohd already running'
+          exec sleep infinity
+        else
+          echo '[zenoh] starting rmw_zenohd...'
+          exec ros2 run rmw_zenoh_cpp rmw_zenohd
+        fi
     working_dir: "/home/Elaina/ros2_ws" # 指定默认工作目录
