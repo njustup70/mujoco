@@ -114,7 +114,27 @@ class SplinePlanner:
         # 将插值结果重新折叠回 (-π, π]
         yaw_ref = float(np.arctan2(np.sin(yaw_unwrapped), np.cos(yaw_unwrapped)))
         return np.array([x_ref, y_ref, yaw_ref])
+    def get_states_batch(self, s_queries: np.ndarray) -> np.ndarray:
+        """
+        一次性插值返回 N 个查询点的 (x, y, yaw)。
+        s_queries: 形状为 (N,) 的弧长数组
+        return: 形状为 (N, 3) 的矩阵 [[x, y, yaw], ...]
+        """
+        # 1. 限制范围 (Clip)，替代 if/else 判断
+        total_length = self.s_samples[-1]
+        s_clipped = np.clip(s_queries, 0.0, total_length)
 
+        # 2. 向量化线性插值 (一次性算出所有点的 x, y, unwrapped_yaw)
+        x_refs = np.interp(s_clipped, self.s_samples, self.x_path)
+        y_refs = np.interp(s_clipped, self.s_samples, self.y_path)
+        yaw_unwrapped = np.interp(s_clipped, self.s_samples, self.yaw_path_unwrapped)
+
+        # 3. 向量化角度归一化
+        # 相比于 sin/cos/arctan2，这个公式在处理数组时通常更快
+        yaw_refs = (yaw_unwrapped + np.pi) % (2 * np.pi) - np.pi
+
+        # 4. 堆叠成 (N, 3) 矩阵返回
+        return np.column_stack((x_refs, y_refs, yaw_refs))
     def plot(self):
         """简单的可视化函数"""
         if len(self.x_path) == 0:

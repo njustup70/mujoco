@@ -60,7 +60,7 @@ class MPCControlNode(Node):
         # self.path_follwer.set_path(target_points, target_yaw=2.0, ref_speed=0.8)
         #增加多个目标点，形成更复杂的路径
         target_points = np.array([[0, 0], [2, 4], [4, 2], [6, 6]])
-        self.force_path_follower.set_path(target_points, target_yaw=2.0, ref_speed=1.8)
+        self.force_path_follower.set_path(target_points, target_yaw=2.0, ref_speed=3)
         # self.force_path_follower.set_target_point(np.array([4.0, 4.0, 1.0]))  # 设置目标点
         self._publish_reference_path_once()
         self.ref_path_timer = self.create_timer(0.5, self._publish_reference_path_once)
