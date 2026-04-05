@@ -316,11 +316,13 @@ class DynamicMPCPathFollower:
 
         # --- 配置 ---
         self.dt = float(dt)
-        self.n_horizon = 20
+        self.n_horizon = 5
         self.model_type = 'continuous'
         
         # --- 状态与路径规划 ---
+        # 假设 SplinePlanner 已在外部定义
         self.path_planner = SplinePlanner() 
+        
         self.is_following_path = False
         self.ref_speed = 1.0
         self.end_point = np.array([0.0, 0.0, 0.0]) # x, y, theta
@@ -330,73 +332,71 @@ class DynamicMPCPathFollower:
         # --- 模型定义 ---
         self.model = do_mpc.model.Model(self.model_type)
 
-        # 状态: [x, y, theta, vx, vy, omega] (均基于质心)
+        # 状态: [x, y, theta, vx, vy, omega] (均基于几何中心 GC)
         self.state = self.model.set_variable(var_type='_x', var_name='state', shape=(6, 1))
-        # 输入: [Fx, Fy, Mz] (作用于质心)
+        # 输入: [Fx, Fy, Mz] (作用于质心的合外力)
         self.u_force = self.model.set_variable(var_type='_u', var_name='u_force', shape=(3, 1))
         # 参考: [x_ref, y_ref, theta_ref]
         ref = self.model.set_variable(var_type='_tvp', var_name='ref', shape=(3, 1))
 
-        # --- 动力学方程 (考虑质心系) ---
+        # --- 动力学方程 (基于几何中心系) ---
         theta = self.state[2]
-        vx = self.state[3]
-        vy = self.state[4]
+        vx = self.state[3]    # 几何中心纵向速度
+        vy = self.state[4]    # 几何中心横向速度
         omega = self.state[5]
 
         Fx = self.u_force[0]
         Fy = self.u_force[1]
         Mz = self.u_force[2]
 
-        # 1. 运动学 (基于质心速度推导世界坐标系变化)
+        # 1. 运动学 (基于几何中心位置推导)
         dx = vx * cos(theta) - vy * sin(theta)
         dy = vx * sin(theta) + vy * cos(theta)
         dtheta = omega
 
-        # 2. 动力学 (Newton-Euler)
-        # 虽然质心偏移，但 F=ma 在质心系下依然成立
-        dvx = Fx / self.mass + vy * omega
-        dvy = Fy / self.mass - vx * omega
+        # 2. 动力学 (考虑质心偏离几何中心带来的耦合项)
+        # 根据 a_cg = a_gc + alpha x r + omega x (omega x r) 推导
+        # 几何中心加速度 = (F/m) - (alpha x r) - (omega x (omega x r))
+        
         domega = Mz / self.iz
+        
+        # 纵向动力学修正
+        dvx = (Fx / self.mass) + vy * omega + (self.dx_cg * omega**2) + (self.dy_cg * domega)
+        
+        # 横向动力学修正
+        dvy = (Fy / self.mass) - vx * omega + (self.dy_cg * omega**2) - (self.dx_cg * domega)
 
         rhs_state = vertcat(dx, dy, dtheta, dvx, dvy, domega)
         assert isinstance(rhs_state, casadi.SX)
         self.model.set_rhs('state', rhs_state)
         self.model.setup()
 
-        # --- 代价函数 (不包含速度误差) ---
+        # --- 代价函数 ---
         pos_err = casadi.sumsqr(self.state[0:2] - ref[0:2])
         angle_diff = self.state[2] - ref[2]
         wrapped_angle_diff = casadi.atan2(sin(angle_diff), cos(angle_diff))
         yaw_err = casadi.sumsqr(wrapped_angle_diff)
 
-        # 仅优化位置和角度，让 MPC 自动决定 vx, vy 来达成目标
         self.lterm = 8.0 * pos_err + 2.0 * yaw_err
-        self.mterm = 12.0 * pos_err + 5.0 * yaw_err
-
-        # --- 在定义 MPC 控制器之后，setup 之前修改 ---
+        self.mterm = 12.0 * pos_err + 2.0 * yaw_err
+        
+        # --- MPC 控制器配置 ---
         self.mpc = do_mpc.controller.MPC(self.model)
 
-        # 1. 明确获取 MPC 层级的控制变量符号 (非常重要)
         u = self.mpc.model.u
         Fx_sym = u['u_force', 0]
         Fy_sym = u['u_force', 1]
 
-        # 2. 计算加速度符号
         ax_sym = Fx_sym / self.mass
         ay_sym = Fy_sym / self.mass
 
-        # 3. 重新设置非线性约束
-        # 摩擦圆
-        # self.mpc.set_nl_cons('friction_circle', (Fx_sym**2 + Fy_sym**2), (self.mu * self.mass * self.g)**2)
-
-        # 防翻转约束 (确保右侧是计算好的常数)
+        # 非线性约束
         limit_x = float(self.g * self.L / 2.0)
         limit_y = float(self.g * self.W / 2.0)
 
-        # 注意：do_mpc 的 fabs 建议使用 casadi.fabs
         self.mpc.set_nl_cons('no_tip_over_x', casadi.fabs(ax_sym * self.h_cg), limit_x)
         self.mpc.set_nl_cons('no_tip_over_y', casadi.fabs(ay_sym * self.h_cg), limit_y)
-        # --- MPC 运行参数 ---
+
         set_up_settings = {
             'n_horizon': self.n_horizon,
             't_step': self.dt,
@@ -411,10 +411,9 @@ class DynamicMPCPathFollower:
         }
         self.mpc.set_param(**set_up_settings)
         
-        # 这里的 Bounds 是虚拟力的物理极限
-        self.mpc.bounds['lower', '_u', 'u_force'] = np.array([[-400.0], [-400.0], [-150.0]])
-        self.mpc.bounds['upper', '_u', 'u_force'] = np.array([[400.0], [400.0], [150.0]])
-
+        self.mpc.bounds['lower', '_u', 'u_force'] = np.array([[-10.0], [-10.0], [-5.0]])
+        self.mpc.bounds['upper', '_u', 'u_force'] = np.array([[10.0], [10.0], [5.0]])
+        self.mpc.set_rterm(u_force=np.array([1e-3, 1e-3, 1e-3])) # 根据震荡程度调整，值越大越平滑
         self.mpc.set_objective(mterm=self.mterm, lterm=self.lterm)
         self.tvp_template = self.mpc.get_tvp_template()
         self.mpc.set_tvp_fun(lambda _t: self.tvp_template)

@@ -3,6 +3,7 @@ from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
 from geometry_msgs.msg import Vector3Stamped
+from std_msgs.msg import Float64MultiArray
 import linear
 from mpc import MPCModel, MPCPathFollower, DynamicMPCPathFollower
 import foxgloveTools
@@ -11,7 +12,26 @@ from state_observer import PoseVelocityObserver,PoseVelocityESO
 class MPCControlNode(Node):
     def __init__(self):
         super().__init__('mpc_control_node')
-        self.dt = 0.1
+        # MuJoCo: dynamics step=0.001, odom publish=0.01s。
+        # 这里将 MPC 步长设置为 0.02s，兼顾实时性与优化稳定性。
+        self.dt = 0.02
+        self.sim_mpc_cfg = {
+            # 来自 robot.xml 的几何与质量近似：
+            # chassis_mass 16kg + 4 wheel(1kg) + 4 pivot(0.5kg) ~= 22kg。
+            'mass': 22.0,
+            # 估算的平面转动惯量，先用中等值保证可控性。
+            'iz': 2.8,
+            # 质心高度（相对接地平面）估计值。
+            'h_cg': 0.10,
+            # 来自 chassis_mass 几何偏移 pos="0.18 0.057 0.0"。
+            'dx_cg': 0.18,
+            'dy_cg': 0.057,
+            # 轮中心坐标在 +-0.325，轴距/轮距约 0.65m。
+            'wheel_base': 0.65,
+            'wheel_width': 0.65,
+            # 与 robot_block.xml 对齐，避免 MPC 假设抓地过强。
+            'mu': 0.6,
+        }
         self.control = MPCModel(dt=self.dt)
         self.subscription = self.create_subscription(
             Odometry,
@@ -19,6 +39,7 @@ class MPCControlNode(Node):
             self.odom_callback,
             0)
         self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.virtual_force_pub = self.create_publisher(Float64MultiArray, '/mujoco/virtual_force_cmd', 10)
         self.cmd_state_pub = self.create_publisher(Vector3Stamped, '/state/cmd_vel', 10)
         self.observer_state_pub = self.create_publisher(Vector3Stamped, '/state/observe_vel', 10)
         self.frame_id = 'odom'
@@ -31,14 +52,14 @@ class MPCControlNode(Node):
         self.ref_path_topic = '/mpc/reference_path'
         self.tracked_path_topic = '/mpc/tracked_path'
         # self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
-        self.path_follwer=MPCPathFollower(0.1,type='swerve')
-        self.force_path_follower = DynamicMPCPathFollower(0.1)
+        self.path_follwer=MPCPathFollower(self.dt,type='swerve')
+        self.force_path_follower = DynamicMPCPathFollower(self.dt, **self.sim_mpc_cfg)
         self.cube=linear.SplinePlanner()
         # 生成一条简单的路径
         target_points = np.array([[0, 0], [2, 4]])
         # self.cube.generate_path(x_pts, y_pts, step_cm=10.0)
-        self.path_follwer.set_path(target_points, target_yaw=2.0, ref_speed=2.0)
-        self.force_path_follower.set_path(target_points, target_yaw=2.0, ref_speed=2.0)
+        self.path_follwer.set_path(target_points, target_yaw=2.0, ref_speed=0.8)
+        self.force_path_follower.set_path(target_points, target_yaw=2.0, ref_speed=0.8)
         self._publish_reference_path_once()
         self.ref_path_timer = self.create_timer(0.5, self._publish_reference_path_once)
         self.initialized = False
@@ -66,6 +87,7 @@ class MPCControlNode(Node):
         asyncio.set_event_loop(self.loop)
         self.thread=threading.Thread(target=self.loop.run_forever,daemon=True)
         self.thread.start()
+        self.get_logger().info(f"force-mpc tuned params: {self.sim_mpc_cfg}, dt={self.dt}")
         # asyncio.run_coroutine_threadsafe(test(), self.loop)
         # self.server=foxglove.start_server(port=8766)
 
@@ -150,6 +172,10 @@ class MPCControlNode(Node):
             self.get_logger().info(
                 f"force_mpc u: Fx={float(u[0]):.3f}, Fy={float(u[1]):.3f}, Mz={float(u[2]):.3f}"
             )
+
+        force_msg = Float64MultiArray()
+        force_msg.data = [float(u[0]), float(u[1]), float(u[2])]
+        self.virtual_force_pub.publish(force_msg)
 
         cmd_state_msg = Vector3Stamped()
         cmd_state_msg.header.stamp = msg.header.stamp
