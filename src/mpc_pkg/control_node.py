@@ -1,10 +1,13 @@
 import numpy as np
 from rclpy.node import Node
-from nav_msgs.msg import Odometry, Path
-from geometry_msgs.msg import Twist, PoseStamped
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Vector3Stamped
 import linear
 from mpc import MPCModel,MPCPathFollower
 import foxgloveTools
+from state_observer import PoseVelocityObserver,PoseVelocityESO
+
 class MPCControlNode(Node):
     def __init__(self):
         super().__init__('mpc_control_node')
@@ -14,16 +17,19 @@ class MPCControlNode(Node):
             Odometry,
             'odom',
             self.odom_callback,
-            10)
+            0)
         self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
-        self.ref_path_pub = self.create_publisher(Path, '/mpc/reference_path', 10)
-        self.tracked_path_pub = self.create_publisher(Path, '/mpc/tracked_path', 10)
+        self.cmd_state_pub = self.create_publisher(Vector3Stamped, '/state/cmd_vel', 10)
+        self.observer_state_pub = self.create_publisher(Vector3Stamped, '/state/observe_vel', 10)
         self.frame_id = 'odom'
         self.max_tracked_points = 2000
-        self.ref_path_msg = Path()
-        self.ref_path_msg.header.frame_id = self.frame_id
-        self.tracked_path_msg = Path()
-        self.tracked_path_msg.header.frame_id = self.frame_id
+        self.path_visual = foxgloveTools.PathVisual(
+            self,
+            frame_id=self.frame_id,
+            max_len=self.max_tracked_points,
+        )
+        self.ref_path_topic = '/mpc/reference_path'
+        self.tracked_path_topic = '/mpc/tracked_path'
         # self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
         self.path_follwer=MPCPathFollower(0.1,type='swerve')
         self.cube=linear.SplinePlanner()
@@ -34,6 +40,18 @@ class MPCControlNode(Node):
         self._publish_reference_path_once()
         self.ref_path_timer = self.create_timer(0.5, self._publish_reference_path_once)
         self.initialized = False
+        self.state_observer = PoseVelocityObserver(
+            min_dt=1e-3,
+            max_dt=0.2,
+            q_linear_acc=20.0,
+            q_yaw_acc=4.0,
+            r_pos=1e-5,
+            r_yaw=2.0e-4,
+            reset_threshold_pos=0.5,
+            reset_threshold_yaw=0.8,
+        )
+        # self.state_observer=PoseVelocityESO()
+        self.observed_body_velocity = np.zeros(3, dtype=float)
 
         # --- 新增：底层控制输出平滑（模拟物理电机的响应过程与惯性） ---
         self.last_u = np.array([0.0, 0.0, 0.0])
@@ -47,48 +65,23 @@ class MPCControlNode(Node):
         # asyncio.run_coroutine_threadsafe(test(), self.loop)
         # self.server=foxglove.start_server(port=8766)
 
-    def _yaw_to_quaternion(self, yaw: float):
-        qz = float(np.sin(yaw * 0.5))
-        qw = float(np.cos(yaw * 0.5))
-        return qz, qw
-
-    def _make_pose_stamped(self, x: float, y: float, yaw: float, stamp):
-        pose = PoseStamped()
-        pose.header.frame_id = self.frame_id
-        pose.header.stamp = stamp
-        pose.pose.position.x = float(x)
-        pose.pose.position.y = float(y)
-        pose.pose.position.z = 0.0
-        qz, qw = self._yaw_to_quaternion(yaw)
-        pose.pose.orientation.x = 0.0
-        pose.pose.orientation.y = 0.0
-        pose.pose.orientation.z = qz
-        pose.pose.orientation.w = qw
-        return pose
-
     def _publish_reference_path_once(self):
         planner = self.path_follwer.path_planner
         if len(planner.x_path) == 0:
             return
 
-        stamp = self.get_clock().now().to_msg()
-        self.ref_path_msg.header.stamp = stamp
-        poses = []
-        for x, y, yaw in zip(planner.x_path, planner.y_path, planner.yaw_path):
-            poses.append(self._make_pose_stamped(x, y, yaw, stamp))
-        self.ref_path_msg.poses = poses
-        self.ref_path_pub.publish(self.ref_path_msg)
+        points = [np.array([x, y, 0.0], dtype=float) for x, y in zip(planner.x_path, planner.y_path)]
+        yaws = [float(yaw) for yaw in planner.yaw_path]
+        self.path_visual.publish_points(self.ref_path_topic, points, yaws=yaws)
 
     def _append_tracked_pose(self, measured_x: float, measured_y: float, measured_theta: float):
-        stamp = self.get_clock().now().to_msg()
-        self.tracked_path_msg.header.stamp = stamp
-        poses = list(self.tracked_path_msg.poses)
-        poses.append(self._make_pose_stamped(measured_x, measured_y, measured_theta, stamp))
-        if len(poses) > self.max_tracked_points:
-            poses = poses[-self.max_tracked_points:]
-        self.tracked_path_msg.poses = poses
-        self.tracked_path_pub.publish(self.tracked_path_msg)
-        
+        self.path_visual.add_point(
+            self.tracked_path_topic,
+            np.array([measured_x, measured_y, 0.0], dtype=float),
+            yaw=float(measured_theta),
+        )
+    from decorder import time_print
+    # @time_print(10)
     def odom_callback(self, msg: Odometry):
         # 从 Odometry 消息中提取测量值
         measured_x = msg.pose.pose.position.x
@@ -98,6 +91,23 @@ class MPCControlNode(Node):
         siny_cosp = 2 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
         measured_theta = np.arctan2(siny_cosp, cosy_cosp)
+
+        stamp = msg.header.stamp
+        stamp_sec = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+        self.observed_body_velocity = self.state_observer.update(
+            measured_x,
+            measured_y,
+            measured_theta,
+            stamp_sec=stamp_sec,
+        )
+        obs_msg = Vector3Stamped()
+        obs_msg.header.stamp = msg.header.stamp
+        obs_msg.header.frame_id = 'base_link'
+        obs_msg.vector.x = float(self.observed_body_velocity[0])
+        obs_msg.vector.y = float(self.observed_body_velocity[1])
+        obs_msg.vector.z = float(self.observed_body_velocity[2])
+        self.observer_state_pub.publish(obs_msg)
+
         self._append_tracked_pose(measured_x, measured_y, measured_theta)
 
         x_mpc = np.array([[measured_x], [measured_y], [measured_theta]])
@@ -120,7 +130,6 @@ class MPCControlNode(Node):
         if(u[0]**2+u[1]**2<1e-2):
             cmd_msg.angular.z=0.0  # 当线速度非常小时，直接将角速度设为0，避免不必要的旋转
         self.pub.publish(cmd_msg)
-
 def main():
     import rclpy
     rclpy.init()
