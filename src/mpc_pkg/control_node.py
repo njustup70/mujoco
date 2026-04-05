@@ -13,9 +13,8 @@ from state_observer import PoseVelocityObserver,PoseVelocityESO
 class MPCControlNode(Node):
     def __init__(self):
         super().__init__('mpc_control_node')
-        # MuJoCo: dynamics step=0.001, odom publish=0.01s。
+        # MuJoCo: dynamics step=0.001, odom publish=0.05s (20Hz)。
         # 这里将 MPC 步长设置为 0.02s，兼顾实时性与优化稳定性。
-        self.dt = 0.02
         self.sim_mpc_cfg = {
             # 来自 robot.xml 的几何与质量近似：
             # chassis_mass 16kg + 4 wheel(1kg) + 4 pivot(0.5kg) ~= 22kg。
@@ -33,7 +32,6 @@ class MPCControlNode(Node):
             # 与 robot_block.xml 对齐，避免 MPC 假设抓地过强。
             'mu': 0.6,
         }
-        self.control = MPCModel(dt=self.dt)
         self.subscription = self.create_subscription(
             Odometry,
             'odom',
@@ -53,14 +51,17 @@ class MPCControlNode(Node):
         self.ref_path_topic = '/mpc/reference_path'
         self.tracked_path_topic = '/mpc/tracked_path'
         # self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
-        self.path_follwer=MPCPathFollower(self.dt,type='swerve')
-        self.force_path_follower = AccMPCPathFollower(self.dt, **self.sim_mpc_cfg)
+        self.path_follwer=MPCPathFollower(dt=0.2)
+        self.force_path_follower = AccMPCPathFollower(0.1, **self.sim_mpc_cfg)
         self.cube=linear.SplinePlanner()
         # 生成一条简单的路径
         target_points = np.array([[0, 0], [2, 4]])
         # self.cube.generate_path(x_pts, y_pts, step_cm=10.0)
-        self.path_follwer.set_path(target_points, target_yaw=2.0, ref_speed=0.8)
-        self.force_path_follower.set_path(target_points, target_yaw=2.0, ref_speed=0.8)
+        # self.path_follwer.set_path(target_points, target_yaw=2.0, ref_speed=0.8)
+        #增加多个目标点，形成更复杂的路径
+        target_points = np.array([[0, 0], [2, 4], [4, 2], [6, 6]])
+        self.force_path_follower.set_path(target_points, target_yaw=2.0, ref_speed=1.8)
+        # self.force_path_follower.set_target_point(np.array([4.0, 4.0, 1.0]))  # 设置目标点
         self._publish_reference_path_once()
         self.ref_path_timer = self.create_timer(0.5, self._publish_reference_path_once)
         self.initialized = False
@@ -89,12 +90,12 @@ class MPCControlNode(Node):
         asyncio.set_event_loop(self.loop)
         self.thread=threading.Thread(target=self.loop.run_forever,daemon=True)
         self.thread.start()
-        self.get_logger().info(f"force-mpc tuned params: {self.sim_mpc_cfg}, dt={self.dt}")
+        self.get_logger().info(f"force-mpc tuned params: {self.sim_mpc_cfg}")
         # asyncio.run_coroutine_threadsafe(test(), self.loop)
         # self.server=foxglove.start_server(port=8766)
 
     def _publish_reference_path_once(self):
-        planner = self.path_follwer.path_planner
+        planner = self.force_path_follower.path_planner
         if len(planner.x_path) == 0:
             return
 
@@ -141,8 +142,6 @@ class MPCControlNode(Node):
         x_mpc = np.array([[measured_x], [measured_y], [measured_theta]])
 
         if not self.initialized:
-            self.control.mpc.x0 = x_mpc
-            self.control.mpc.set_initial_guess()
             self.path_follwer.set_state_init(x_mpc)
             x_force_init = np.array([
                 [measured_x],
@@ -182,18 +181,6 @@ class MPCControlNode(Node):
             self.get_logger().info(
                 f"acc_mpc v_cmd: vx={float(v_cmd[0]):.3f}, vy={float(v_cmd[1]):.3f}, omega={float(v_cmd[2]):.3f}"
             )
-
-        if self.use_virtual_force_output:
-            # 如需切回力控，可将该开关改为 True。
-            # 这里保留兼容：若需要力控，可按速度反推加速度/力矩后再发。
-            fx = self.sim_mpc_cfg['mass'] * float(v_cmd[0] - self.observed_body_velocity[0]) / self.dt
-            fy = self.sim_mpc_cfg['mass'] * float(v_cmd[1] - self.observed_body_velocity[1]) / self.dt
-            mz = self.sim_mpc_cfg['iz'] * float(v_cmd[2] - self.observed_body_velocity[2]) / self.dt
-            force_msg = Float64MultiArray()
-            force_msg.data = [fx, fy, mz]
-            self.virtual_force_pub.publish(force_msg)
-
-        
 
         if not self.publish_to_sim:
             return

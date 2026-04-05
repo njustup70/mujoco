@@ -34,7 +34,7 @@ class AccMPCPathFollower:
         self.dt = float(dt)
         self.n_horizon = 10           # 加速度控制下，预测时域可以稍微长一点
         self.is_following_path = False
-        self.ref_speed = 0.5
+        self.ref_speed = 1.5
         self.end_point = np.array([0.0, 0.0, 0.0], dtype=float)
         self.s = 0.0
         self.int_vel_cmd = np.zeros(3, dtype=float)
@@ -68,8 +68,8 @@ class AccMPCPathFollower:
 
         # 2. 速度变化 (考虑向心力修正)
         # dv = a + (omega x v)
-        dvx = ax 
-        dvy = ay 
+        dvx = ax + omega * vy
+        dvy = ay + omega * (-vx)
         domega = alpha
 
         rhs_state = vertcat(dx, dy, dtheta, dvx, dvy, domega)
@@ -92,8 +92,8 @@ class AccMPCPathFollower:
         limit_ay_tip = (self.g * self.W / 2.0) / self.h_cg
         print(f"Calculated tip-over limits: ax <= {limit_ax_tip:.2f} m/s², ay <= {limit_ay_tip:.2f} m/s²")
         # 直接设置在 bounds 里比 nl_cons 更高效
-        self.mpc.bounds['lower', '_u', 'u_acc'] = np.array([[-5], [-5], [-0.0]])
-        self.mpc.bounds['upper', '_u', 'u_acc'] = np.array([[5], [5], [0.0]])
+        self.mpc.bounds['lower', '_u', 'u_acc'] = np.array([[-5], [-5], [-5.0]])
+        self.mpc.bounds['upper', '_u', 'u_acc'] = np.array([[5], [5], [5.0]])
 
         # --- 代价函数 ---
         pos_err = casadi.sumsqr(self.state[0:2] - ref[0:2])
@@ -101,8 +101,8 @@ class AccMPCPathFollower:
         yaw_err = casadi.sumsqr(casadi.atan2(sin(angle_diff), cos(angle_diff)))
         
         # 惩罚速度，防止无限制加速 (如果路径没有速度参考)
-        self.mpc.set_objective(mterm=15.0 * pos_err + 5.0 * yaw_err, 
-                               lterm=10.0 * pos_err + 2.0 * yaw_err )
+        self.mpc.set_objective(mterm=5.0 * pos_err + 5.0 * yaw_err, 
+                               lterm=15.0 * pos_err + 5.0 * yaw_err )
         
         # 惩罚加速度的变化率，让动作更平滑
         self.mpc.set_rterm(u_acc=np.array([1e-1, 1e-1, 1e-1]))
@@ -182,12 +182,13 @@ class AccMPCPathFollower:
         # 求解 MPC 得到当前的加速度输入 [ax, ay, alpha]
         u_acc = self.mpc.make_step(x)
 
-        # 在 MPC 内部完成一次积分，输出速度指令。
-        self.int_vel_cmd[0] += float(u_acc[0, 0]) * self.dt
-        self.int_vel_cmd[1] += float(u_acc[1, 0]) * self.dt
-        self.int_vel_cmd[2] += float(u_acc[2, 0]) * self.dt
+     # 3. 获取期望速度 (方案：当前速度 + 加速度 * dt)
+        # 这样比累加器更鲁棒，因为它每一帧都基于实测的当前速度 x[3:6]
+        vx_cmd = float(x[3, 0] + u_acc[0, 0] * self.dt)
+        vy_cmd = float(x[4, 0] + u_acc[1, 0] * self.dt)
+        omega_cmd = float(x[5, 0] + u_acc[2, 0] * self.dt)
 
-        return self.int_vel_cmd.copy()
+        return np.array([vx_cmd, vy_cmd, omega_cmd])
 
     def set_target_point(self, target: np.ndarray):
         """
