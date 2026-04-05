@@ -5,7 +5,8 @@ from geometry_msgs.msg import Twist
 from geometry_msgs.msg import Vector3Stamped
 from std_msgs.msg import Float64MultiArray
 import linear
-from mpc import MPCModel, MPCPathFollower, DynamicMPCPathFollower
+from mpc import MPCModel, MPCPathFollower
+from forcempc import AccMPCPathFollower
 import foxgloveTools
 from state_observer import PoseVelocityObserver,PoseVelocityESO
 
@@ -53,7 +54,7 @@ class MPCControlNode(Node):
         self.tracked_path_topic = '/mpc/tracked_path'
         # self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
         self.path_follwer=MPCPathFollower(self.dt,type='swerve')
-        self.force_path_follower = DynamicMPCPathFollower(self.dt, **self.sim_mpc_cfg)
+        self.force_path_follower = AccMPCPathFollower(self.dt, **self.sim_mpc_cfg)
         self.cube=linear.SplinePlanner()
         # 生成一条简单的路径
         target_points = np.array([[0, 0], [2, 4]])
@@ -63,7 +64,8 @@ class MPCControlNode(Node):
         self._publish_reference_path_once()
         self.ref_path_timer = self.create_timer(0.5, self._publish_reference_path_once)
         self.initialized = False
-        self.publish_to_sim = False
+        self.publish_to_sim = True
+        self.use_virtual_force_output = False
         self._log_counter = 0
         self.state_observer = PoseVelocityObserver(
             min_dt=1e-3,
@@ -164,36 +166,44 @@ class MPCControlNode(Node):
             [self.observed_body_velocity[2]],
         ], dtype=float)
 
-        # 力控 MPC 输出 U 是力矩 [Fx, Fy, Mz]
+        # AccMPC 输出 U 是加速度 [ax, ay, alpha]
         import asyncio
-        u = asyncio.run_coroutine_threadsafe(self.force_path_follower.async_update(x_force), self.loop).result()
-        self._log_counter += 1
-        if self._log_counter % 10 == 0:
-            self.get_logger().info(
-                f"force_mpc u: Fx={float(u[0]):.3f}, Fy={float(u[1]):.3f}, Mz={float(u[2]):.3f}"
-            )
-
-        force_msg = Float64MultiArray()
-        force_msg.data = [float(u[0]), float(u[1]), float(u[2])]
-        self.virtual_force_pub.publish(force_msg)
-
+        v_cmd = asyncio.run_coroutine_threadsafe(self.force_path_follower.async_update(x_force), self.loop).result()
         cmd_state_msg = Vector3Stamped()
         cmd_state_msg.header.stamp = msg.header.stamp
         cmd_state_msg.header.frame_id = 'base_link'
-        cmd_state_msg.vector.x = float(u[0])
-        cmd_state_msg.vector.y = float(u[1])
-        cmd_state_msg.vector.z = float(u[2])
+        cmd_state_msg.vector.x = float(v_cmd[0])
+        cmd_state_msg.vector.y = float(v_cmd[1])
+        cmd_state_msg.vector.z = float(v_cmd[2])
         self.cmd_state_pub.publish(cmd_state_msg)
+
+        self._log_counter += 1
+        if self._log_counter % 10 == 0:
+            self.get_logger().info(
+                f"acc_mpc v_cmd: vx={float(v_cmd[0]):.3f}, vy={float(v_cmd[1]):.3f}, omega={float(v_cmd[2]):.3f}"
+            )
+
+        if self.use_virtual_force_output:
+            # 如需切回力控，可将该开关改为 True。
+            # 这里保留兼容：若需要力控，可按速度反推加速度/力矩后再发。
+            fx = self.sim_mpc_cfg['mass'] * float(v_cmd[0] - self.observed_body_velocity[0]) / self.dt
+            fy = self.sim_mpc_cfg['mass'] * float(v_cmd[1] - self.observed_body_velocity[1]) / self.dt
+            mz = self.sim_mpc_cfg['iz'] * float(v_cmd[2] - self.observed_body_velocity[2]) / self.dt
+            force_msg = Float64MultiArray()
+            force_msg.data = [fx, fy, mz]
+            self.virtual_force_pub.publish(force_msg)
+
+        
 
         if not self.publish_to_sim:
             return
 
         # 仅在显式开启时才发布到仿真，默认关闭
         cmd_msg = Twist()
-        cmd_msg.linear.x = u[0]
-        cmd_msg.linear.y = u[1]
-        cmd_msg.angular.z = u[2]
-        if (u[0]**2 + u[1]**2 < 1e-2):
+        cmd_msg.linear.x = float(v_cmd[0])
+        cmd_msg.linear.y = float(v_cmd[1])
+        cmd_msg.angular.z = float(v_cmd[2])
+        if (v_cmd[0]**2 + v_cmd[1]**2 < 1e-2):
             cmd_msg.angular.z=0.0  # 当线速度非常小时，直接将角速度设为0，避免不必要的旋转
         self.pub.publish(cmd_msg)
 def main():
