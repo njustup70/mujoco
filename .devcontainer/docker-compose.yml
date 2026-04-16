@@ -17,6 +17,8 @@ services:
     runtime: "nvidia"
     tty: true
     network_mode: "host"
+    pid: "host"
+    ipc: "host"
     user: 'Elaina'
     privileged: true
     stdin_open: true
