@@ -8,7 +8,7 @@ from linear import SplinePlanner
 class AcadosMPC:
     def __init__(self, dt: float, model_type: str = 'omni', n_horizon: int = 20):
         self.dt, self.n_horizon, self.model_type = float(dt), n_horizon, model_type
-        
+        assert model_type in ['swerve', 'omni'], "type must be 'swerve' or 'omni'"
         # 1. 模型与约束定义
         model = AcadosModel()
         model.name = f"mpc_{model_type}"
@@ -19,7 +19,7 @@ class AcadosMPC:
         if model_type == 'swerve':
             v, alpha, vw = u[0], u[1], u[2]  # [速度, 舵角, 角速度]
             f_expl = vertcat(v * cos(theta + alpha), v * sin(theta + alpha), vw)
-            lbu, ubu = np.array([-3.0, -np.pi, -2.0]), np.array([3.0, np.pi, 2.0])
+            lbu, ubu = np.array([-4.0, -np.pi, -2.0]), np.array([4.0, np.pi, 2.0])
         else: # omni
             vx, vy, vw = u[0], u[1], u[2]    # [vx, vy, vw] (车体系)
             f_expl = vertcat(vx * cos(theta) - vy * sin(theta), vx * sin(theta) + vy * cos(theta), vw)
@@ -35,6 +35,8 @@ class AcadosMPC:
         ocp.solver_options.tf = n_horizon * dt
         ocp.solver_options.qp_solver, ocp.solver_options.nlp_solver_type = 'PARTIAL_CONDENSING_HPIPM', 'SQP_RTI'
         ocp.solver_options.integrator_type = 'ERK'
+        ocp.solver_options.sim_method_num_stages = 4 # 龙格库塔的级数
+        ocp.solver_options.sim_method_num_steps = 3  # 在一个 dt 内分 3 步走
         # 控制约束
         ocp.constraints.idxbu, ocp.constraints.lbu, ocp.constraints.ubu = np.arange(3), lbu, ubu
         ocp.constraints.x0 = np.zeros(3)
@@ -45,11 +47,23 @@ class AcadosMPC:
         nx = 3
         nu = 3
         ny = nx + nu
-        # 代价权重（状态 + 控制）
-        ocp.cost.W = np.diag([10.0, 10.0, 2.0, 0.5, 0.5, 0.5])
-        ocp.cost.W_0 = ocp.cost.W
-        ocp.cost.W_e = np.diag([10.0, 10.0, 2.0])
+        # 代价权重（状态 + 控制），按底盘类型拆分
+        if self.model_type == 'swerve':
+            state_w = np.array([20.0, 20.0, 12.0])
+            input_w = np.array([0.35, 12, 0.75])
+            terminal_w = np.array([12.0, 12.0, 24.0])
+        else:
+            state_w = np.array([20.0, 20.0, 10.0])
+            input_w = np.array([0.50, 0.5, 0.50])
+            terminal_w = np.array([10.0, 10.0, 20.0])
+        theta_ref = SX.sym('theta_ref')#type: ignore
+        # 计算角度误差的 wrapped 版本
+        angle_diff = model.x[2] - theta_ref
+        wrapped_angle_diff = atan2(sin(angle_diff), cos(angle_diff))
 
+        ocp.cost.W = np.diag(np.concatenate([state_w, input_w]))
+        ocp.cost.W_0 = ocp.cost.W
+        ocp.cost.W_e = np.diag(terminal_w)
         # 使用与 forcempc 相同的 cost_y_expr 结构： [x; u]
         ocp.model.cost_y_expr = vertcat(model.x, model.u)
         ocp.model.cost_y_expr_e = model.x

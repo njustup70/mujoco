@@ -30,13 +30,13 @@ class MPCControlNode(Node):
         self.ref_path_topic = '/mpc/reference_path'
         self.tracked_path_topic = '/mpc/tracked_path'
         # self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
-        self.path_follwer= AcadosMPC(0.1,model_type='omni')
+        self.path_follwer= AcadosMPC(0.05,model_type='omni',n_horizon=80)
         self.cube=linear.SplinePlanner()
         # 生成一条简单的路径
-        target_points = np.array([[0, 0], [2, 4]])
+        target_points = np.array([[0, 0], [8, 8]])
         # self.cube.generate_path(x_pts, y_pts, step_cm=10.0)
-        # self.path_follwer.set_path(target_points, target_yaw=2.0, ref_speed=2.0)
-        self.path_follwer.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
+        self.path_follwer.set_path(target_points, target_yaw=2.0, ref_speed=3.0)
+        self.path_follwer.set_target_point(np.array([0.0, 2.0, 3.0]))  # 设置目标点
         self._publish_reference_path_once()
         self.ref_path_timer = self.create_timer(0.5, self._publish_reference_path_once)
         self.initialized = False
@@ -120,8 +120,8 @@ class MPCControlNode(Node):
         cmd_msg.linear.y = u[1]
         cmd_msg.angular.z = u[2]
         # 发布控制命令
-        if(u[0]**2+u[1]**2<1e-2):
-            cmd_msg.angular.z=0.0  # 当线速度非常小时，直接将角速度设为0，避免不必要的旋转
+        # if(u[0]**2+u[1]**2<1e-2):
+        #     cmd_msg.angular.z=0.0  # 当线速度非常小时，直接将角速度设为0，避免不必要的旋转
         self.pub.publish(cmd_msg)
 def main():
     import rclpy
