@@ -4,7 +4,7 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
 from geometry_msgs.msg import Vector3Stamped
 import linear
-from mpc_acados import AcadosMPC,AcadosAugmentedSwerveMPC
+import mpc_acados as mpc
 import foxgloveTools
 from state_observer import PoseVelocityObserver,PoseVelocityESO
 
@@ -30,8 +30,8 @@ class MPCControlNode(Node):
         self.ref_path_topic = '/mpc/reference_path'
         self.tracked_path_topic = '/mpc/tracked_path'
         # self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
-        # self.path_follwer= AcadosAugmentedSwerveMPC(0.01,n_horizon=80)
-        self.path_follwer=AcadosMPC(0.05,model_type='swerve',n_horizon=80)
+        self.path_follwer= mpc.AugmentedSwerveMPC(0.01, n_horizon=100)
+        # self.path_follwer=AcadosMPC(0.05,model_type='swerve',n_horizon=100)
         self.cube=linear.SplinePlanner()
         # 生成一条简单的路径
         target_points = np.array([[0, 0], [8, 8]])
