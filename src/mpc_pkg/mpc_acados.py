@@ -27,7 +27,8 @@ class AcadosMPC:
             
         model.f_expl_expr = f_expl
         model.f_impl_expr = SX.sym('x_dot', 3) - f_expl # type: ignore
-
+        p = SX.sym('p', 3) #type: ignore
+        model.p = p
         # 2. OCP 求解器配置
         ocp = AcadosOcp()
         ocp.model = model
@@ -65,15 +66,21 @@ class AcadosMPC:
         ocp.cost.W_0 = ocp.cost.W
         ocp.cost.W_e = np.diag(terminal_w)
         # 使用与 forcempc 相同的 cost_y_expr 结构： [x; u]
-        ocp.model.cost_y_expr = vertcat(model.x, model.u)
-        ocp.model.cost_y_expr_e = model.x
+        pos_err = x[0:2] - p[0:2]
+        angle_diff = x[2] - p[2]
+        wrapped_angle_diff = atan2(sin(angle_diff), cos(angle_diff))
+
+        # cost_y_expr 定义了 [状态误差; 控制量]
+        # 我们的目标是让这些表达式的结果趋于 yref (即 0)
+        ocp.model.cost_y_expr = vertcat(pos_err, wrapped_angle_diff, u)
+        ocp.model.cost_y_expr_e = vertcat(pos_err, wrapped_angle_diff)
 
         # 初始化 yref 缓冲，保持和 forcempc 一致的变量名
         self._yref_buffer = np.zeros(ny)
         self._yref_e_buffer = np.zeros(nx)
         ocp.cost.yref = np.zeros(ny)
         ocp.cost.yref_e = np.zeros(nx)
-        
+        ocp.parameter_values = np.zeros(3)
         self.solver = AcadosOcpSolver(ocp, json_file=f"{model_type}_ocp.json",verbose=False)
         self.path_planner = SplinePlanner()
 
@@ -98,7 +105,7 @@ class AcadosMPC:
             ref_states_all = self.path_planner.get_states_batch(s_queries)
 
             # 构建 yref 数据 (n_horizon, ny)
-            ny = 6
+            ny = 3
             yref_data = np.zeros((self.n_horizon, ny))
             reference_yaw = ref_states_all[-1, 2]
             yref_data[:, 0:2] = ref_states_all[:self.n_horizon, 0:2]
@@ -107,21 +114,21 @@ class AcadosMPC:
 
             # 虽然 API 层面通常需要指定 k，但可以利用列表推导式配合 set
             # 这比手动在循环里做切片和赋值快
-            [self.solver.set(k, "yref", yref_data[k]) for k in range(self.n_horizon)]
+            [self.solver.set(k, "p", yref_data[k]) for k in range(self.n_horizon)]
 
             # 终端参考
             self._yref_e_buffer[0:3] = ref_states_all[-1, 0:3]
-            self.solver.set(self.n_horizon, "yref", self._yref_e_buffer)
+            self.solver.set(self.n_horizon, "p", self._yref_e_buffer)
         else:
             tp = getattr(self, 'target_point', x)
             # 构建单点 yref 并复制到所有时刻
-            ny = 6
+            ny = 3
             yref_single = np.zeros(ny)
             yref_single[0:3] = tp.flatten()
             for k in range(self.n_horizon):
-                self.solver.set(k, "yref", yref_single)
+                self.solver.set(k, "p", yref_single)
             self._yref_e_buffer[0:3] = tp.flatten()
-            self.solver.set(self.n_horizon, "yref", self._yref_e_buffer)
+            self.solver.set(self.n_horizon, "p", self._yref_e_buffer)
 
         # 设置当前状态约束（第 0 时刻）
         self.solver.set(0, "lbx", x)
