@@ -51,7 +51,7 @@ class AcadosMPC:
         # 代价权重（状态 + 控制），按底盘类型拆分
         if self.model_type == 'swerve':
             state_w = np.array([20.0, 20.0, 12.0])
-            input_w = np.array([0.35, 12, 0.75])
+            input_w = np.array([0.35, 12, 12])
             terminal_w = np.array([12.0, 12.0, 24.0])
         else:
             state_w = np.array([20.0, 20.0, 10.0])
