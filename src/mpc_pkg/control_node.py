@@ -4,7 +4,7 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
 from geometry_msgs.msg import Vector3Stamped
 import linear
-from mpc import MPCModel,MPCPathFollower
+from mpc_acados import AcadosMPC
 import foxgloveTools
 from state_observer import PoseVelocityObserver,PoseVelocityESO
 
@@ -12,7 +12,6 @@ class MPCControlNode(Node):
     def __init__(self):
         super().__init__('mpc_control_node')
         self.dt = 0.1
-        self.control = MPCModel(dt=self.dt)
         self.subscription = self.create_subscription(
             Odometry,
             'odom',
@@ -31,12 +30,13 @@ class MPCControlNode(Node):
         self.ref_path_topic = '/mpc/reference_path'
         self.tracked_path_topic = '/mpc/tracked_path'
         # self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
-        self.path_follwer=MPCPathFollower(0.1,type='swerve')
+        self.path_follwer= AcadosMPC(0.1,model_type='omni')
         self.cube=linear.SplinePlanner()
         # 生成一条简单的路径
         target_points = np.array([[0, 0], [2, 4]])
         # self.cube.generate_path(x_pts, y_pts, step_cm=10.0)
-        self.path_follwer.set_path(target_points, target_yaw=2.0, ref_speed=2.0)
+        # self.path_follwer.set_path(target_points, target_yaw=2.0, ref_speed=2.0)
+        self.path_follwer.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
         self._publish_reference_path_once()
         self.ref_path_timer = self.create_timer(0.5, self._publish_reference_path_once)
         self.initialized = False
@@ -112,16 +112,9 @@ class MPCControlNode(Node):
 
         x_mpc = np.array([[measured_x], [measured_y], [measured_theta]])
 
-        if not self.initialized:
-            self.control.mpc.x0 = x_mpc
-            self.control.mpc.set_initial_guess()
-            self.path_follwer.set_state_init(x_mpc)
-            self.initialized = True
-            return
-
         # 新模型下 U 直接是速度 [vx, vy, vw]
-        import asyncio
-        u=asyncio.run_coroutine_threadsafe(self.path_follwer.async_update(x_mpc), self.loop).result()  # 等待结果
+        
+        u=self.path_follwer.update(x_mpc)
         cmd_msg = Twist()
         cmd_msg.linear.x = u[0]
         cmd_msg.linear.y = u[1]

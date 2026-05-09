@@ -7,3 +7,5 @@ result.json
 c_generated_code/
 acados_ocp.json
 tmp/
+mpc_model_acados_ocp.json
+*_ocp.json
