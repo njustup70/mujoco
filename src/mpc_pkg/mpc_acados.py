@@ -310,4 +310,5 @@ class AcadosAugmentedSwerveMPC:
         # 返回 u = [vx, vy, vw] 以适配后续控制接口
         out=x_next[3:6]
         u= np.array([out[0]*cos(out[1]), out[0]*sin(out[1]), out[2]]).flatten()
+        # print(u,x_next)
         return u
