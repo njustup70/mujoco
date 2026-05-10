@@ -31,6 +31,7 @@ class SwerveManifoldController:
         # A 的每一行 a_i = [-sin(theta), cos(theta), r_ix*cos(theta) + r_iy*sin(theta)]
         A = np.zeros((self.num_wheels, 3))
         for i in range(self.num_wheels):
+            theta_real[i]=math.atan2(math.sin(theta_real[i]), math.cos(theta_real[i]))  # 将实际角度规范化到 [-pi, pi]
             s_i = np.sin(theta_real[i])
             c_i = np.cos(theta_real[i])
             r_ix, r_iy = self.r[i]
@@ -41,7 +42,7 @@ class SwerveManifoldController:
 
         # 2. 计算投影矩阵 P = I - A_pinv * A
         # A_pinv 是 A 的摩尔-彭若斯伪逆
-        A_pinv = np.linalg.pinv(A)
+        A_pinv = np.linalg.pinv(A,rcond=1e-2)
         P = self.I - np.dot(A_pinv, A)
 
         # 3. 流形分解：将目标速度投影到零空间 (合法运动空间)
@@ -79,7 +80,7 @@ class SwerveManifoldController:
             wheel_thetas[i], wheel_speeds[i] =self.optimize_steer_arc(theta,speed,theta_real[i])
         #进行流形分解
         v_safe, speeds = self.compute_safe_velocity(theta_real, v_target)
-        return wheel_thetas,wheel_speeds
+        return wheel_thetas,speeds
     def optimize_steer_arc(self,desired_steer: float, speed: float, last_steer: float) -> tuple[float, float]:
         """优劣弧优化：在(舵角+正转)与(舵角+pi+反转)中选择转角更小的一组。"""
         #归一化到+-pi范围内
@@ -109,8 +110,8 @@ if __name__ == "__main__":
     controller = SwerveManifoldController()
 
     # 情况：你想前进 [vx=1.0, vy=0, w=0]，但舵轮由于延迟，角度还没转到0，全在 45度(pi/4)
-    current_thetas = [np.pi/4] * 4 
-    target_v = [0.0, 0.0, 2.0]
+    current_thetas = [np.pi/4, np.pi/4, np.pi/4.1, np.pi/4]  # 四个轮子当前都在 45 度位置
+    target_v = [2.0, 0.0, 0.0]
 
     v_safe, speeds = controller.compute_safe_velocity(current_thetas, target_v)
     

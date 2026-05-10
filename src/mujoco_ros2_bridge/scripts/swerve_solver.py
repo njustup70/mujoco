@@ -5,12 +5,7 @@ import numpy as np
 
 def wrap_to_near(angle: float, center: float) -> float:
     """Wrap angle to be the nearest representation around center."""
-    d = angle - center
-    while d > math.pi:
-        d -= 2.0 * math.pi
-    while d < -math.pi:
-        d += 2.0 * math.pi
-    return center + d
+    return center + (angle - center + math.pi) % (2.0 * math.pi) - math.pi
 
 
 def decompose_wheel_velocity(vx: float, vy: float, vyaw: float, wheel_xy: tuple[float, float]) -> tuple[float, float]:
@@ -108,8 +103,12 @@ class SwerveSolver:
         target_speeds_linear = norm_speed_list
 
         for i in range(len(target_angles)):
-            # 直接透传角度，不进行增量累积积分
-            new_angle = target_angles[i]
+            # 将目标角度映射到当前实际角度附近，避免受外部控制器 +/- PI 突变影响
+            current_steer = current_steer_angles[i]
+            target_angle = wrap_to_near(target_angles[i], current_steer)
+            
+            # 直接透传映射后的连续角度
+            new_angle = target_angle
             
             # 线速度 -> 轮子转速 (rad/s)
             wheel_linear = target_speeds_linear[i]
