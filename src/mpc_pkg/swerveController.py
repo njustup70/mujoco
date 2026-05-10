@@ -79,18 +79,19 @@ class SwerveManifoldController:
             wheel_thetas[i], wheel_speeds[i] =self.optimize_steer_arc(theta,speed,theta_real[i])
         #进行流形分解
         v_safe, speeds = self.compute_safe_velocity(theta_real, v_target)
-        speeds = speeds /0.058 # 将线速度转换为轮速指令（rpm）
-        return wheel_thetas,speeds
+        return wheel_thetas,wheel_speeds
     def optimize_steer_arc(self,desired_steer: float, speed: float, last_steer: float) -> tuple[float, float]:
         """优劣弧优化：在(舵角+正转)与(舵角+pi+反转)中选择转角更小的一组。"""
-        steer_a = (desired_steer) % (2.0 * math.pi)
+        #归一化到+-pi范围内
+        steer_a = math.atan2(math.sin(desired_steer), math.cos(desired_steer))  # 将 desired_steer 规范化到 [-pi, pi]
         drive_a = speed
-        #归一化到2pi范围内，避免
-        steer_b = ( desired_steer + math.pi) % (2.0 * math.pi)
+        steer_b = steer_a + math.pi
+        if steer_b > math.pi:
+            steer_b -= 2 * math.pi
         drive_b = -speed
 
-        da=math.atan2(math.sin(steer_a), math.cos(steer_a))  # 将角度规范化到 [-pi, pi]
-        db=math.atan2(math.sin(steer_b), math.cos(steer_b))
+        da=math.atan2(math.sin(steer_a-last_steer), math.cos(steer_a-last_steer))  # 将角度规范化到 [-pi, pi]
+        db=math.atan2(math.sin(steer_b-last_steer), math.cos(steer_b-last_steer))  # 将角度规范化到 [-pi, pi]
         if abs(da) <= abs(db):
             return steer_a, drive_a
         return steer_b, drive_b
@@ -100,7 +101,7 @@ if __name__ == "__main__":
     # 假设底盘是 0.5m x 0.5m 的正方形，定义四个轮子的位置 [r_ix, r_iy]
     coords = [
         [0.325, 0.325],   # 前左
-        [0.25, -0.325],  # 前右
+        [0.325, -0.325],  # 前右
         [-0.325, 0.325],  # 后左
         [-0.325, -0.325]  # 后右
     ]
@@ -109,7 +110,7 @@ if __name__ == "__main__":
 
     # 情况：你想前进 [vx=1.0, vy=0, w=0]，但舵轮由于延迟，角度还没转到0，全在 45度(pi/4)
     current_thetas = [np.pi/4] * 4 
-    target_v = [-0.5, 0.0, 0.0]
+    target_v = [0.0, 0.0, 2.0]
 
     v_safe, speeds = controller.compute_safe_velocity(current_thetas, target_v)
     

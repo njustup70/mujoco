@@ -21,12 +21,8 @@ class MujocoSimNode(Node):
     def __init__(self):
         super().__init__('mujoco_sim_node')
 
-        # 0. 简洁默认配置（不依赖 ROS 参数读取）
+        # 0. 配置（只保留必要项，去除所有滞后和噪声参数）
         self.use_viewer = True
-        self.wheel_steer_noise_std = 0.008
-        self.wheel_drive_noise_std = 0.1
-        self.wheel_steer_lag_alpha = 0.0
-        self.wheel_drive_lag_alpha = 0.0
         self.noise_cfg = OdomNoiseConfig(
             std_pos_100hz=0.0002,
             std_ori_100hz=0.002,
@@ -49,50 +45,50 @@ class MujocoSimNode(Node):
         self.chassis_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'chassis')
 
         # 2. 通讯组件
-        self.cmd_vel_sub = self.create_subscription(Twist, 'cmd_vel', self.cmd_vel_callback, 10)
-        # 新增：舵轮直接控制订阅器
-        self.cmd_swerve_sub = self.create_subscription(Float64MultiArray, '/cmd_swerve', self.cmd_swerve_callback, 10)
-        # 发布带噪声里程计与 TF
-        self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
+        self.cmd_vel_sub = self.create_subscription(Twist, '/control/cmd_vel', self.cmd_vel_callback, 10)
+        self.cmd_swerve_sub = self.create_subscription(Float64MultiArray, '/control/cmd_swerve', self.cmd_swerve_callback, 10)
+
+        # 发布 TF 和消息
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
-        self.base_link_state_pub = self.create_publisher(Vector3Stamped, '/state/base_link', 10)
-        self.real_vel_pub = self.create_publisher(Vector3Stamped, '/mujoco/real_vel', 10)
-        self.state_test_pub = self.create_publisher(Vector3Stamped, '/state/test', 10)
+        self.truth_odom_pub = self.create_publisher(Odometry, '/sim/truth/odom', 10)
+        self.noisy_odom_pub = self.create_publisher(Odometry, '/sim/odom', 10)
+        self.real_vel_pub = self.create_publisher(Vector3Stamped, '/sim/real_vel', 10)
+        self.steer_state_pub = self.create_publisher(Float64MultiArray, '/sim/steer_state', 10)
 
         # 3. 状态变量
         self.target_v_x = 0.0
         self.target_v_y = 0.0
         self.target_v_yaw = 0.0
-        self.prev_test_time = None
-        self.prev_test_pos = None
         
-        # 新增：舵轮直接控制相关变量
-        self.control_mode = 'chassis_vel'  # 控制模式: 'chassis_vel' 或 'swerve_direct'
-        self.target_swerve_angles = [0.0, 0.0, 0.0, 0.0]  # 目标舵轮角度
-        self.target_swerve_speeds = [0.0, 0.0, 0.0, 0.0]  # 目标舵轮速度
-        self.swerve_cmd_timeout = 0.5  # 舵轮指令超时时间（秒）
-        self.last_swerve_cmd_time = 0.0  # 最后一次接收舵轮指令的时间
+        # 舵轮直接控制
+        self.control_mode = 'chassis_vel'
+        self.target_swerve_angles = [0.0, 0.0, 0.0, 0.0]
+        self.target_swerve_speeds = [0.0, 0.0, 0.0, 0.0]
+        self.swerve_cmd_timeout = 0.5
+        self.last_swerve_cmd_time = 0.0
         
         self.wheels_pos = [(0.325, 0.325), (0.325, -0.325), (-0.325, 0.325), (-0.325, -0.325)]
         self.wheel_radius = 0.058
         
-        # 舵关节在 qpos 中的下标（用于读取当前实际舵角）
+        # 舵关节顺序：FL, FR, RL, RR (按照 control_node 约定)
+        self.steering_names = ['wheel0_steer', 'wheel1_steer', 'wheel2_steer', 'wheel3_steer']
+        self.driving_names = ['wheel0_drive', 'wheel1_drive', 'wheel2_drive', 'wheel3_drive']
+        
         self.steer_qposadr = [
-            self.model.jnt_qposadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, f'wheel{i}_steer')]
-            for i in range(4)
+            self.model.jnt_qposadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)]
+            for name in self.steering_names
         ]
 
-        # 舵轮解算器：内部管理一阶滞后和噪声
+        # 轮子位置也需要与舵关节顺序对应：FL, FR, RL, RR
+        self.wheels_pos = [(0.325, 0.325), (0.325, -0.325), (-0.325, 0.325), (-0.325, -0.325)]
+
+        # 舵轮解算器（只保留运动学解算，无滞后无噪声）
         self.swerve_solver = SwerveSolver(
             wheels_pos=self.wheels_pos,
             wheel_radius=self.wheel_radius,
-            steer_lag_alpha=self.wheel_steer_lag_alpha,
-            drive_lag_alpha=self.wheel_drive_lag_alpha,
-            steer_noise_std=self.wheel_steer_noise_std,
-            drive_noise_std=self.wheel_drive_noise_std,
         )
 
-        # 4. 定时器：100Hz 发布真值与带噪声 odom/TF
+        # 4. 定时器：100Hz 发布
         self.timer = self.create_timer(0.01, self.publish_truth_callback)
 
         # 5. 启动仿真线程
@@ -108,27 +104,20 @@ class MujocoSimNode(Node):
         self.control_mode = 'chassis_vel'
 
     def cmd_swerve_callback(self, msg):
-        """接收舵轮直接控制指令 [steer0, speed0, steer1, speed1, steer2, speed2, steer3, speed3]"""
+        """接收舵轮直接控制指令 [steer0, steer1, steer2, steer3, speed0, speed1, speed2, speed3]
+        按照 control_node 顺序：FL, FR, RL, RR
+        数值为归一化值，在 swerve_solver 中转换为物理量
+        """
         if len(msg.data) >= 8:
-            self.target_swerve_angles = [msg.data[i] for i in range(0, 8, 2)]
-            self.target_swerve_speeds = [msg.data[i] for i in range(1, 8, 2)]
+            # 前四个为角度，后四个为速度
+            self.target_swerve_angles = list(msg.data[0:4])
+            self.target_swerve_speeds = list(msg.data[4:8])
             self.control_mode = 'swerve_direct'
             self.last_swerve_cmd_time = time.time()
 
     def simulation_loop(self):
-        viewer = None
         
-        # 仅在启用 viewer 且存在 DISPLAY 环境变量时尝试启动
-        if self.use_viewer and os.environ.get('DISPLAY'):
-            try:
-                viewer = mujoco.viewer.launch_passive(self.model, self.data)
-                self.get_logger().info("MuJoCo viewer launched successfully.")
-            except Exception as e:
-                self.get_logger().error(f"Failed to launch MuJoCo viewer: {e}. Running in headless mode.")
-                viewer = None
-        else:
-            self.get_logger().info("Running in headless mode (no viewer).")
-
+        viewer = mujoco.viewer.launch_passive(self.model, self.data)
         while not self.stop_event.is_set():
             if viewer is not None and not viewer.is_running():
                 break
@@ -139,34 +128,29 @@ class MujocoSimNode(Node):
             current_steer_angles = [self.data.qpos[self.steer_qposadr[i]] for i in range(4)]
             
             # 2. 根据控制模式计算电机指令
-            if self.control_mode == 'swerve_direct':
-                # 检查舵轮指令是否超时
-                current_time = time.time()
-                if current_time - self.last_swerve_cmd_time > self.swerve_cmd_timeout:
-                    # 超时，切回底盘速度模式
-                    self.control_mode = 'chassis_vel'
-                    self.target_v_x = 0.0
-                    self.target_v_y = 0.0
-                    self.target_v_yaw = 0.0
-                    motor_commands = self.swerve_solver.get_actuator_commands(0.0, 0.0, 0.0, current_steer_angles)
-                else:
-                    # 使用舵轮直接控制
-                    motor_commands = self.swerve_solver.apply_motor_dynamics(
-                        self.target_swerve_angles,
-                        self.target_swerve_speeds,
-                        current_steer_angles
-                    )
+            # 我们始终使用归一化角度和线速度 (m/s)
+            # 检查舵轮指令是否超时
+            current_time = time.time()
+            if current_time - self.last_swerve_cmd_time > self.swerve_cmd_timeout:
+                # 超时或未收到指令，设为 0
+                norm_angles = [0.0] * 4
+                norm_speeds = [0.0] * 4
             else:
-                # 底盘速度控制模式（原有逻辑）
-                motor_commands = self.swerve_solver.get_actuator_commands(
-                    self.target_v_x,
-                    self.target_v_y,
-                    self.target_v_yaw,
-                    current_steer_angles
-                )
+                norm_angles = self.target_swerve_angles
+                norm_speeds = self.target_swerve_speeds
+
+            # 使用舵轮直接控制（归一化输入 -> 在 swerve_solver 内转换为物理量并做角度积分，无滞后无噪声）
+            dt = float(self.model.opt.timestep)
+            motor_commands = self.swerve_solver.get_direct_actuator_commands(
+                norm_angles,
+                norm_speeds,
+                current_steer_angles,
+                dt,
+            )
             
-            # 3. 下达电机指令给 MuJoCo 促动器
+            # 3. 下达电机指令给 MuJoCo 促动器 (顺序需与 steering_names 一一对应)
             for i, (steer_ctrl, drive_ctrl) in enumerate(motor_commands):
+                # 利用 steering_names/driving_names 获取正确的 actuator 名称
                 self.data.actuator(f'steer{i}').ctrl[0] = steer_ctrl
                 self.data.actuator(f'drive{i}').ctrl[0] = drive_ctrl
 
@@ -182,7 +166,7 @@ class MujocoSimNode(Node):
             viewer.close()
 
     def publish_truth_callback(self):
-        # 统一使用现实时间
+        """发布基于 MuJoCo 仿真数据的 ROS2 消息"""
         stamp_msg = self.get_clock().now().to_msg()
         pos = self.data.body('chassis').xpos.copy()
         quat = self.data.body('chassis').xquat.copy()
@@ -195,60 +179,25 @@ class MujocoSimNode(Node):
             body_vel,
             1,
         )
-        
-        # 1. 发布带有噪声的里程计（内部通过 OdomNoiseGenerator 处理）
-        odom_truth = Odometry()
-        odom_truth.header.stamp = stamp_msg
-        odom_truth.pose.pose.position.x = pos[0]
-        odom_truth.pose.pose.position.y = pos[1]
-        odom_truth.pose.pose.position.z = pos[2]
-        odom_truth.pose.pose.orientation.w = quat[0]
-        odom_truth.pose.pose.orientation.x = quat[1]
-        odom_truth.pose.pose.orientation.y = quat[2]
-        odom_truth.pose.pose.orientation.z = quat[3]
-        odom_truth.twist.twist.linear.x = body_vel[3]
-        odom_truth.twist.twist.linear.y = body_vel[4]
-        odom_truth.twist.twist.linear.z = body_vel[5]
-        odom_truth.twist.twist.angular.x = body_vel[0]
-        odom_truth.twist.twist.angular.y = body_vel[1]
-        odom_truth.twist.twist.angular.z = body_vel[2]
 
-        # 2. 生成带有噪声的观测值并发布 TF (odom -> base_link)
-        noisy_pos, noisy_quat, noisy_v_lin, noisy_v_ang = self.noise_gen.apply_to_truth(odom_truth)
-        
-        noisy_odom = Odometry()
-        noisy_odom.header.stamp = stamp_msg
-        noisy_odom.header.frame_id = 'odom'
-        noisy_odom.child_frame_id = 'base_link'
-        noisy_odom.pose.pose.position.x = noisy_pos[0]
-        noisy_odom.pose.pose.position.y = noisy_pos[1]
-        noisy_odom.pose.pose.position.z = noisy_pos[2]
-        # 注意：odom_noise_node 的 quaternion_from_euler 返回 [x, y, z, w]
-        noisy_odom.pose.pose.orientation.x = noisy_quat[0]
-        noisy_odom.pose.pose.orientation.y = noisy_quat[1]
-        noisy_odom.pose.pose.orientation.z = noisy_quat[2]
-        noisy_odom.pose.pose.orientation.w = noisy_quat[3]
-        noisy_odom.twist.twist.linear.x = noisy_v_lin[0]
-        noisy_odom.twist.twist.linear.y = noisy_v_lin[1]
-        noisy_odom.twist.twist.linear.z = noisy_v_lin[2]
-        noisy_odom.twist.twist.angular.x = noisy_v_ang[0]
-        noisy_odom.twist.twist.angular.y = noisy_v_ang[1]
-        noisy_odom.twist.twist.angular.z = noisy_v_ang[2]
-        self.odom_pub.publish(noisy_odom)
+        # 发布舵机真实角度反馈 (用于 control_node 的流形速度分解)
+        current_steer_angles = [self.data.qpos[self.steer_qposadr[i]] for i in range(4)]
+        steer_msg = Float64MultiArray()
+        steer_msg.data = [float(a) for a in current_steer_angles]
+        self.steer_state_pub.publish(steer_msg)
 
-        # 3. 发布 TF 变换
-        t = TransformStamped()
-        t.header.stamp = stamp_msg
-        t.header.frame_id = 'odom'
-        t.child_frame_id = 'base_link'
-        t.transform.translation.x = noisy_pos[0]
-        t.transform.translation.y = noisy_pos[1]
-        t.transform.translation.z = noisy_pos[2]
-        t.transform.rotation.x = noisy_quat[0]
-        t.transform.rotation.y = noisy_quat[1]
-        t.transform.rotation.z = noisy_quat[2]
-        t.transform.rotation.w = noisy_quat[3]
-        self.tf_broadcaster.sendTransform(t)
+        # 调用 odom_noise_node 构建所有 ROS2 消息类型
+        truth_odom, truth_tf, noisy_tf, noisy_odom, real_vel = self.noise_gen.apply_to_truth(
+            stamp_msg, pos, quat, body_vel
+        )
+
+        # 广播 TF 和发布消息
+        self.tf_broadcaster.sendTransform(noisy_tf)
+        self.truth_odom_pub.publish(truth_odom)
+        self.noisy_odom_pub.publish(noisy_odom)
+        self.real_vel_pub.publish(real_vel)
+
+
 
     def destroy_node(self):
         self.stop_event.set()

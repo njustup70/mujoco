@@ -40,35 +40,25 @@ class SwerveSolver:
 
     def __init__(self, 
                  wheels_pos: list[tuple[float, float]], 
-                 wheel_radius: float,
-                 steer_lag_alpha: float = 0.0,
-                 drive_lag_alpha: float = 0.0,
-                 steer_noise_std: float = 0.0,
-                 drive_noise_std: float = 0.0):
+                 wheel_radius: float):
         """
         初始化舵轮解算器。
         
         Args:
             wheels_pos: 四个轮子相对底盘中心的位置 [(x1,y1), (x2,y2), ...]
             wheel_radius: 轮子半径
-            steer_lag_alpha: 舵机一阶滞后系数 (0 ~ 1)
-            drive_lag_alpha: 驱动电机一阶滞后系数 (0 ~ 1)
-            steer_noise_std: 舵控响应噪声标准差
-            drive_noise_std: 驱动控响应噪声标准差
         """
         self.wheels_pos = wheels_pos
         self.wheel_radius = wheel_radius
-        self.steer_lag_alpha = steer_lag_alpha
-        self.drive_lag_alpha = drive_lag_alpha
-        self.steer_noise_std = steer_noise_std
-        self.drive_noise_std = drive_noise_std
+        
+        # 记录累积的角度（用于累积积分）
+        self.accumulated_steer_angles = [0.0] * len(wheels_pos)
         
         # 舵轮目标角度统计（用于优劣弧选择）
         self.last_target_angles = [0.0] * len(wheels_pos)
         
-        # 电机响应状态（一阶滞后）
-        self.last_steer_ctrl = [0.0] * len(wheels_pos)
-        self.last_drive_ctrl = [0.0] * len(wheels_pos)
+        # 直接控制时的参数（归一化 -> 物理量）
+        self.max_wheel_linear_speed = 5.0  # m/s
 
     def solve(self, vx: float, vy: float, vyaw: float) -> list[tuple[float, float]]:
         """
@@ -100,68 +90,32 @@ class SwerveSolver:
 
         return targets
 
-    def apply_motor_dynamics(self, 
-                             target_steer_list: list[float], 
-                             target_drive_list: list[float],
-                             current_steer_angles: list[float]) -> list[tuple[float, float]]:
-        """
-        应用电机一阶滞后和响应噪声。
-        
-        Args:
-            target_steer_list: 目标舵角 (rad)
-            target_drive_list: 目标驱动速度 (rad/s)
-            current_steer_angles: 当前实际舵角 (rad) - 用于 2π 归一化
-            
-        Returns:
-            list[(steer_ctrl, drive_ctrl)] 最终电机指令
+    def get_direct_actuator_commands(self,
+                                     norm_steer_list: list[float],
+                                     norm_speed_list: list[float],
+                                     current_steer_angles: list[float],
+                                     dt: float) -> list[tuple[float, float]]:
+        """针对接收到的指令直接转至 MuJoCo 促动器：
+        - norm_steer_list: 映射后的目标角度 (rad)
+        - norm_speed_list: 映射后的目标线速度 (m/s)
+        - dt: 仿真步长，用于做舵角积分（限幅）
+
+        返回值为 list[(steer_ctrl, drive_ctrl)]，其中 steer_ctrl 为角度(rad)，drive_ctrl 为轮子角速度(rad/s)
         """
         controls = []
-        for i in range(len(target_steer_list)):
-            target_steer = target_steer_list[i]
-            target_drive = target_drive_list[i]
-            current_steer = current_steer_angles[i]
+        # 直接使用传入的物理量（已在 control_node 完成分解和映射）
+        target_angles = norm_steer_list
+        target_speeds_linear = norm_speed_list
+
+        for i in range(len(target_angles)):
+            # 直接透传角度，不进行增量累积积分
+            new_angle = target_angles[i]
             
-            # 将目标舵角归一化到当前舵角附近，避免 ±π 跳变
-            target_steer = wrap_to_near(target_steer, current_steer)
-            
-            # 一阶滞后更新（或直接用目标值）
-            if self.steer_lag_alpha > 0:
-                self.last_steer_ctrl[i] = wrap_to_near(self.last_steer_ctrl[i], current_steer)
-                self.last_steer_ctrl[i] += self.steer_lag_alpha * (target_steer - self.last_steer_ctrl[i])
-                steer_output = self.last_steer_ctrl[i]
-            else:
-                steer_output = target_steer
-            
-            if self.drive_lag_alpha > 0:
-                self.last_drive_ctrl[i] += self.drive_lag_alpha * (target_drive - self.last_drive_ctrl[i])
-                drive_output = self.last_drive_ctrl[i]
-            else:
-                drive_output = target_drive
-            
-            # 加入响应高频噪声
-            steer_ctrl = wrap_to_near(
-                steer_output + np.random.normal(0.0, self.steer_noise_std),
-                current_steer
-            )
-            drive_ctrl = drive_output + np.random.normal(0.0, self.drive_noise_std)
-            
-            controls.append((steer_ctrl, drive_ctrl))
-            
+            # 线速度 -> 轮子转速 (rad/s)
+            wheel_linear = target_speeds_linear[i]
+            wheel_rads = wheel_linear / self.wheel_radius if self.wheel_radius != 0 else 0.0
+
+            controls.append((new_angle, wheel_rads))
+
         return controls
 
-    def get_actuator_commands(self, 
-                              vx: float, vy: float, vyaw: float, 
-                              current_steer_angles: list[float]) -> list[tuple[float, float]]:
-        """
-        [接口解耦实现] 一个方法完成从底盘速度到电机执行指令的全过程转换。
-        封装了：运动学解算(IK)、优劣弧优化、一阶滞后、响应噪声。
-        """
-        # 1. 运动学解算
-        target_steer_list, target_drive_list = zip(*self.solve(vx, vy, vyaw))
-        
-        # 2. 应用电机动力学与噪声
-        return self.apply_motor_dynamics(
-            list(target_steer_list),
-            list(target_drive_list),
-            current_steer_angles
-        )

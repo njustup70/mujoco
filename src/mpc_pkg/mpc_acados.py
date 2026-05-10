@@ -214,18 +214,6 @@ class AugmentedSwerveMPC(AcadosMPCBase):
         # x_pos 为外部传入的 [x, y, yaw]
         x_full = np.concatenate([x_current.flatten(), self.last_aug_state])
         output= super().update(x_full)
-        # 在 solve 之后插入
-        x0_dbg = self.solver.get(0, "x")
-        x1_dbg = self.solver.get(1, "x")
-        u0_dbg = self.solver.get(0, "u")
-        
-        # 终点附近0.1m内输出debug信息
-        if np.linalg.norm(x_current[0:2] - self.solver.get(self.n_horizon, "p")[0:2]) < 0.01 :
-            print(f"Debug Info at Close Proximity:")
-            print(f"x0: {x0_dbg}")
-            print(f"u0: {u0_dbg}")
-            print(f"x1: {x1_dbg}")
-     
         return output     
     def _process_output(self, u_0, x_1):
         # 提取预测的下一步状态作为当前的底盘指令
