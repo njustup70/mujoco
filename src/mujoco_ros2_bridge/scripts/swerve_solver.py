@@ -148,3 +148,20 @@ class SwerveSolver:
             controls.append((steer_ctrl, drive_ctrl))
             
         return controls
+
+    def get_actuator_commands(self, 
+                              vx: float, vy: float, vyaw: float, 
+                              current_steer_angles: list[float]) -> list[tuple[float, float]]:
+        """
+        [接口解耦实现] 一个方法完成从底盘速度到电机执行指令的全过程转换。
+        封装了：运动学解算(IK)、优劣弧优化、一阶滞后、响应噪声。
+        """
+        # 1. 运动学解算
+        target_steer_list, target_drive_list = zip(*self.solve(vx, vy, vyaw))
+        
+        # 2. 应用电机动力学与噪声
+        return self.apply_motor_dynamics(
+            list(target_steer_list),
+            list(target_drive_list),
+            current_steer_angles
+        )

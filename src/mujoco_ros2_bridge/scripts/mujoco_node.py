@@ -90,19 +90,6 @@ class MujocoSimNode(Node):
         self.thread = threading.Thread(target=self.simulation_loop)
         self.thread.start()
 
-    @staticmethod
-    def _sim_time_to_msg(sim_time_sec: float) -> TimeMsg:
-        # 使用 MuJoCo 仿真时间作为消息时间戳，保证下游用 stamp 求 dt 时与物理积分一致。
-        sec = int(sim_time_sec)
-        nanosec = int(round((sim_time_sec - sec) * 1e9))
-        if nanosec >= 1_000_000_000:
-            sec += 1
-            nanosec -= 1_000_000_000
-        msg = TimeMsg()
-        msg.sec = sec
-        msg.nanosec = nanosec
-        return msg
-
     def cmd_vel_callback(self, msg):
         self.target_v_x = msg.linear.x
         self.target_v_y = msg.linear.y
@@ -128,24 +115,18 @@ class MujocoSimNode(Node):
                 
             step_start = time.time()
             
-            # 1. 舵轮运动解算：根据速度指令得到目标舵角和速度
-            target_steer_list, target_drive_list = zip(*self.swerve_solver.solve(
+            # 1. 读取当前实际舵角 (底盘反馈)
+            current_steer_angles = [self.data.qpos[self.steer_qposadr[i]] for i in range(4)]
+            
+            # 2. 调用模块化接口：包含解算、动力学模拟和噪声处理
+            motor_commands = self.swerve_solver.get_actuator_commands(
                 self.target_v_x,
                 self.target_v_y,
                 self.target_v_yaw,
-            ))
-            
-            # 2. 读取当前实际舵角
-            current_steer_angles = [self.data.qpos[self.steer_qposadr[i]] for i in range(4)]
-            
-            # 3. 应用电机动力学：一阶滞后 + 响应噪声
-            motor_commands = self.swerve_solver.apply_motor_dynamics(
-                list(target_steer_list),
-                list(target_drive_list),
                 current_steer_angles
             )
             
-            # 4. 下达电机指令
+            # 3. 下达电机指令给 MuJoCo 促动器
             for i, (steer_ctrl, drive_ctrl) in enumerate(motor_commands):
                 self.data.actuator(f'steer{i}').ctrl[0] = steer_ctrl
                 self.data.actuator(f'drive{i}').ctrl[0] = drive_ctrl
@@ -162,7 +143,8 @@ class MujocoSimNode(Node):
             viewer.close()
 
     def publish_truth_callback(self):
-        stamp_msg = self._sim_time_to_msg(float(self.data.time))
+        # 统一使用现实时间
+        stamp_msg = self.get_clock().now().to_msg()
         pos = self.data.body('chassis').xpos.copy()
         quat = self.data.body('chassis').xquat.copy()
         body_vel = np.zeros(6, dtype=float)
@@ -175,71 +157,26 @@ class MujocoSimNode(Node):
             1,
         )
         
-        # 1. 发布 Odometry 消息
-        odom = Odometry()
-        odom.header.stamp = stamp_msg
-        odom.pose.pose.position.x = pos[0]
-        odom.pose.pose.position.y = pos[1]
-        odom.pose.pose.position.z = pos[2]
-        odom.pose.pose.orientation.w = quat[0]
-        odom.pose.pose.orientation.x = quat[1]
-        odom.pose.pose.orientation.y = quat[2]
-        odom.pose.pose.orientation.z = quat[3]
-        odom.twist.twist.linear.x = body_vel[3]
-        odom.twist.twist.linear.y = body_vel[4]
-        odom.twist.twist.linear.z = body_vel[5]
-        odom.twist.twist.angular.x = body_vel[0]
-        odom.twist.twist.angular.y = body_vel[1]
-        odom.twist.twist.angular.z = body_vel[2]
+        # 1. 发布带有噪声的里程计（内部通过 OdomNoiseGenerator 处理）
+        odom_truth = Odometry()
+        odom_truth.header.stamp = stamp_msg
+        odom_truth.pose.pose.position.x = pos[0]
+        odom_truth.pose.pose.position.y = pos[1]
+        odom_truth.pose.pose.position.z = pos[2]
+        odom_truth.pose.pose.orientation.w = quat[0]
+        odom_truth.pose.pose.orientation.x = quat[1]
+        odom_truth.pose.pose.orientation.y = quat[2]
+        odom_truth.pose.pose.orientation.z = quat[3]
+        odom_truth.twist.twist.linear.x = body_vel[3]
+        odom_truth.twist.twist.linear.y = body_vel[4]
+        odom_truth.twist.twist.linear.z = body_vel[5]
+        odom_truth.twist.twist.angular.x = body_vel[0]
+        odom_truth.twist.twist.angular.y = body_vel[1]
+        odom_truth.twist.twist.angular.z = body_vel[2]
 
-        # 2. 由 odom_noise_node.py 模块计算并发布 noisy odom 与 odom->base_link TF
-        noisy_pos, noisy_quat, noisy_v_lin, noisy_v_ang = self.noise_gen.apply_to_truth(odom)
-        noisy_yaw = float(np.arctan2(
-            2.0 * (noisy_quat[3] * noisy_quat[2] + noisy_quat[0] * noisy_quat[1]),
-            1.0 - 2.0 * (noisy_quat[1] * noisy_quat[1] + noisy_quat[2] * noisy_quat[2]),
-        ))
-
-        base_link_state = Vector3Stamped()
-        base_link_state.header.stamp = stamp_msg
-        base_link_state.header.frame_id = 'odom'
-        base_link_state.vector.x = float(noisy_pos[0])
-        base_link_state.vector.y = float(noisy_pos[1])
-        base_link_state.vector.z = noisy_yaw
-        self.base_link_state_pub.publish(base_link_state)
-
-        # 简单差分估计平面速度：v = sqrt(vx^2 + vy^2)
-        state_test_msg = Vector3Stamped()
-        state_test_msg.header.stamp = stamp_msg
-        state_test_msg.header.frame_id = 'odom'
-        now_t = float(self.data.time)
-        if self.prev_test_time is not None and self.prev_test_pos is not None:
-            dt = now_t - self.prev_test_time
-            if dt > 1e-9:
-                vx_diff = (float(noisy_pos[0]) - self.prev_test_pos[0]) / dt
-                vy_diff = (float(noisy_pos[1]) - self.prev_test_pos[1]) / dt
-                state_test_msg.vector.x = float(np.hypot(vx_diff, vy_diff))
-                state_test_msg.vector.y = vx_diff
-                state_test_msg.vector.z = vy_diff
-            else:
-                state_test_msg.vector.x = 0.0
-                state_test_msg.vector.y = 0.0
-                state_test_msg.vector.z = 0.0
-        else:
-            state_test_msg.vector.x = 0.0
-            state_test_msg.vector.y = 0.0
-            state_test_msg.vector.z = 0.0
-        self.state_test_pub.publish(state_test_msg)
-        self.prev_test_time = now_t
-        self.prev_test_pos = (float(noisy_pos[0]), float(noisy_pos[1]))
-
-        real_vel_msg = Vector3Stamped()
-        real_vel_msg.header.stamp = stamp_msg
-        real_vel_msg.header.frame_id = 'base_link'
-        real_vel_msg.vector.x = float(body_vel[3])
-        real_vel_msg.vector.y = float(body_vel[4])
-        real_vel_msg.vector.z = float(body_vel[2])
-        self.real_vel_pub.publish(real_vel_msg)
-
+        # 2. 生成带有噪声的观测值并发布 TF (odom -> base_link)
+        noisy_pos, noisy_quat, noisy_v_lin, noisy_v_ang = self.noise_gen.apply_to_truth(odom_truth)
+        
         noisy_odom = Odometry()
         noisy_odom.header.stamp = stamp_msg
         noisy_odom.header.frame_id = 'odom'
@@ -247,6 +184,7 @@ class MujocoSimNode(Node):
         noisy_odom.pose.pose.position.x = noisy_pos[0]
         noisy_odom.pose.pose.position.y = noisy_pos[1]
         noisy_odom.pose.pose.position.z = noisy_pos[2]
+        # 注意：odom_noise_node 的 quaternion_from_euler 返回 [x, y, z, w]
         noisy_odom.pose.pose.orientation.x = noisy_quat[0]
         noisy_odom.pose.pose.orientation.y = noisy_quat[1]
         noisy_odom.pose.pose.orientation.z = noisy_quat[2]
@@ -259,6 +197,7 @@ class MujocoSimNode(Node):
         noisy_odom.twist.twist.angular.z = noisy_v_ang[2]
         self.odom_pub.publish(noisy_odom)
 
+        # 3. 发布 TF 变换
         t = TransformStamped()
         t.header.stamp = stamp_msg
         t.header.frame_id = 'odom'
