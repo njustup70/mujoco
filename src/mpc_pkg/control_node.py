@@ -3,10 +3,12 @@ from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
 from geometry_msgs.msg import Vector3Stamped
+from std_msgs.msg import Float64MultiArray
 import linear
 import mpc_acados as mpc
 import foxgloveTools
 from state_observer import PoseVelocityObserver,PoseVelocityESO
+from swerveController import SwerveManifoldController
 
 class MPCControlNode(Node):
     def __init__(self):
@@ -20,6 +22,8 @@ class MPCControlNode(Node):
         self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
         self.cmd_state_pub = self.create_publisher(Vector3Stamped, '/state/cmd_vel', 10)
         self.observer_state_pub = self.create_publisher(Vector3Stamped, '/state/observe_vel', 10)
+        # 新增：舵轮指令发布器 (格式: [steer0, speed0, steer1, speed1, steer2, speed2, steer3, speed3])
+        self.swerve_cmd_pub = self.create_publisher(Float64MultiArray, '/cmd_swerve', 10)
         self.frame_id = 'odom'
         self.max_tracked_points = 2000
         self.path_visual = foxgloveTools.PathVisual(
@@ -53,6 +57,10 @@ class MPCControlNode(Node):
         )
         # self.state_observer=PoseVelocityESO()
         self.observed_body_velocity = np.zeros(3, dtype=float)
+
+        # --- 新增：舵轮控制器（用于速度分解） ---
+        self.swerve_controller = SwerveManifoldController()
+        self.current_steer_angles = np.array([0.0, 0.0, 0.0, 0.0])  # 当前舵轮反馈角度
 
         # --- 新增：底层控制输出平滑（模拟物理电机的响应过程与惯性） ---
         self.last_u = np.array([0.0, 0.0, 0.0])
@@ -124,6 +132,23 @@ class MPCControlNode(Node):
         # if(u[0]**2+u[1]**2<1e-2):
         #     cmd_msg.angular.z=0.0  # 当线速度非常小时，直接将角速度设为0，避免不必要的旋转
         self.pub.publish(cmd_msg)
+        
+        # --- 新增：舵轮速度分解 ---
+        # 将底盘速度指令分解为各舵轮的目标角度和线速度
+        try:
+            wheel_thetas, wheel_speeds = self.swerve_controller.cmd_vel_compute(u, self.current_steer_angles)
+            # 更新当前舵轮反馈角度（用于下一次分解）
+            self.current_steer_angles = wheel_thetas.copy()
+            
+            # 发布舵轮指令：[steer0, speed0, steer1, speed1, steer2, speed2, steer3, speed3]
+            swerve_cmd = Float64MultiArray()
+            swerve_cmd.data = []
+            for i in range(4):
+                swerve_cmd.data.append(float(wheel_thetas[i]))
+                swerve_cmd.data.append(float(wheel_speeds[i]))
+            self.swerve_cmd_pub.publish(swerve_cmd)
+        except Exception as e:
+            self.get_logger().error(f'速度分解异常: {e}')
 def main():
     import rclpy
     rclpy.init()

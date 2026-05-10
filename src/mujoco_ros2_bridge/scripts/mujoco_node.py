@@ -4,6 +4,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist, TransformStamped
 from geometry_msgs.msg import Vector3Stamped
 from nav_msgs.msg import Odometry
+from std_msgs.msg import Float64MultiArray
 import tf2_ros
 import mujoco
 import mujoco.viewer
@@ -49,6 +50,8 @@ class MujocoSimNode(Node):
 
         # 2. 通讯组件
         self.cmd_vel_sub = self.create_subscription(Twist, 'cmd_vel', self.cmd_vel_callback, 10)
+        # 新增：舵轮直接控制订阅器
+        self.cmd_swerve_sub = self.create_subscription(Float64MultiArray, '/cmd_swerve', self.cmd_swerve_callback, 10)
         # 发布带噪声里程计与 TF
         self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
@@ -62,6 +65,13 @@ class MujocoSimNode(Node):
         self.target_v_yaw = 0.0
         self.prev_test_time = None
         self.prev_test_pos = None
+        
+        # 新增：舵轮直接控制相关变量
+        self.control_mode = 'chassis_vel'  # 控制模式: 'chassis_vel' 或 'swerve_direct'
+        self.target_swerve_angles = [0.0, 0.0, 0.0, 0.0]  # 目标舵轮角度
+        self.target_swerve_speeds = [0.0, 0.0, 0.0, 0.0]  # 目标舵轮速度
+        self.swerve_cmd_timeout = 0.5  # 舵轮指令超时时间（秒）
+        self.last_swerve_cmd_time = 0.0  # 最后一次接收舵轮指令的时间
         
         self.wheels_pos = [(0.325, 0.325), (0.325, -0.325), (-0.325, 0.325), (-0.325, -0.325)]
         self.wheel_radius = 0.058
@@ -94,6 +104,16 @@ class MujocoSimNode(Node):
         self.target_v_x = msg.linear.x
         self.target_v_y = msg.linear.y
         self.target_v_yaw = msg.angular.z
+        # 切换回底盘速度控制模式
+        self.control_mode = 'chassis_vel'
+
+    def cmd_swerve_callback(self, msg):
+        """接收舵轮直接控制指令 [steer0, speed0, steer1, speed1, steer2, speed2, steer3, speed3]"""
+        if len(msg.data) >= 8:
+            self.target_swerve_angles = [msg.data[i] for i in range(0, 8, 2)]
+            self.target_swerve_speeds = [msg.data[i] for i in range(1, 8, 2)]
+            self.control_mode = 'swerve_direct'
+            self.last_swerve_cmd_time = time.time()
 
     def simulation_loop(self):
         viewer = None
@@ -118,13 +138,32 @@ class MujocoSimNode(Node):
             # 1. 读取当前实际舵角 (底盘反馈)
             current_steer_angles = [self.data.qpos[self.steer_qposadr[i]] for i in range(4)]
             
-            # 2. 调用模块化接口：包含解算、动力学模拟和噪声处理
-            motor_commands = self.swerve_solver.get_actuator_commands(
-                self.target_v_x,
-                self.target_v_y,
-                self.target_v_yaw,
-                current_steer_angles
-            )
+            # 2. 根据控制模式计算电机指令
+            if self.control_mode == 'swerve_direct':
+                # 检查舵轮指令是否超时
+                current_time = time.time()
+                if current_time - self.last_swerve_cmd_time > self.swerve_cmd_timeout:
+                    # 超时，切回底盘速度模式
+                    self.control_mode = 'chassis_vel'
+                    self.target_v_x = 0.0
+                    self.target_v_y = 0.0
+                    self.target_v_yaw = 0.0
+                    motor_commands = self.swerve_solver.get_actuator_commands(0.0, 0.0, 0.0, current_steer_angles)
+                else:
+                    # 使用舵轮直接控制
+                    motor_commands = self.swerve_solver.apply_motor_dynamics(
+                        self.target_swerve_angles,
+                        self.target_swerve_speeds,
+                        current_steer_angles
+                    )
+            else:
+                # 底盘速度控制模式（原有逻辑）
+                motor_commands = self.swerve_solver.get_actuator_commands(
+                    self.target_v_x,
+                    self.target_v_y,
+                    self.target_v_yaw,
+                    current_steer_angles
+                )
             
             # 3. 下达电机指令给 MuJoCo 促动器
             for i, (steer_ctrl, drive_ctrl) in enumerate(motor_commands):

@@ -46,7 +46,7 @@ class AcadosMPCBase(ABC):
         ocp.solver_options.nlp_solver_type = 'SQP_RTI'
         ocp.solver_options.integrator_type = 'ERK'
         ocp.solver_options.sim_method_num_stages = 4
-        ocp.solver_options.sim_method_num_steps = 3
+        ocp.solver_options.sim_method_num_steps = 10
         ocp.cost.cost_type = 'NONLINEAR_LS'
         ocp.cost.cost_type_e = 'NONLINEAR_LS'
         # 调用子类特有的权重和约束配置
@@ -206,15 +206,27 @@ class AugmentedSwerveMPC(AcadosMPCBase):
         ocp.model.cost_y_expr_e = vertcat(pos_err, wrapped_angle_diff, ocp.model.x[3:6])
         
         ocp.cost.cost_type = ocp.cost.cost_type_e = 'NONLINEAR_LS'
-        ocp.cost.W = np.diag([2.0, 2.0, 2.0, 0, 0, 0, 0.1, 0.5, 0.5])
-        ocp.cost.W_e = np.diag([8.0, 8.0, 8.0, 0.2, 0.2, 0.2])
-
+        ocp.cost.W = np.diag([2.0, 2.0, 2.0, 0, 0, 0, 0.01, 0.5, 0.5])
+        ocp.cost.W_e = np.diag([8.0, 8.0, 8.0,3, 0.0, 0.2])
     def update(self, x_current: np.ndarray) -> np.ndarray:
+        
         """重写 update 以处理增广状态的拼接"""
         # x_pos 为外部传入的 [x, y, yaw]
         x_full = np.concatenate([x_current.flatten(), self.last_aug_state])
-        return super().update(x_full)
-
+        output= super().update(x_full)
+        # 在 solve 之后插入
+        x0_dbg = self.solver.get(0, "x")
+        x1_dbg = self.solver.get(1, "x")
+        u0_dbg = self.solver.get(0, "u")
+        
+        # 终点附近0.1m内输出debug信息
+        if np.linalg.norm(x_current[0:2] - self.solver.get(self.n_horizon, "p")[0:2]) < 0.01 :
+            print(f"Debug Info at Close Proximity:")
+            print(f"x0: {x0_dbg}")
+            print(f"u0: {u0_dbg}")
+            print(f"x1: {x1_dbg}")
+     
+        return output     
     def _process_output(self, u_0, x_1):
         # 提取预测的下一步状态作为当前的底盘指令
         v_next, alpha_next, vw_next = x_1[3:6]
