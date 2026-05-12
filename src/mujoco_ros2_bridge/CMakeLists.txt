@@ -21,6 +21,11 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(
+  DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../models
+  DESTINATION .
+)
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
