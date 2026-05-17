@@ -10,8 +10,29 @@ def generate_launch_description():
             name='mujoco_node',
             output='screen'
         ),
+
+        # 2. 发布由 MuJoCo 静态碰撞体生成的真值栅格地图
+        Node(
+            package='mujoco_ros2_bridge',
+            executable='static_grid_map_node.py',
+            name='static_grid_map_node',
+            output='screen',
+            parameters=[{
+                'frame_id': 'odom',
+                'map_topic': '/map',
+                'resolution': 0.05,
+                'origin_x': -10.0,
+                'origin_y': -10.0,
+                'width': 400,
+                'height': 400,
+                'collision_groups': [3],
+                'occupied_height_min': 0.05,
+                'occupied_height_max': 2.0,
+                'inflation_radius': 0.0,
+            }]
+        ),
         
-        # 2. odom_noise 逻辑已内聚到 mujoco_node.py，不再单独启动节点
+        # odom_noise 逻辑已内聚到 mujoco_node.py，不再单独启动节点
         
         # # 3. 启动手柄转换节点
         # Node(

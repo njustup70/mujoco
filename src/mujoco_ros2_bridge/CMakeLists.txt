@@ -9,7 +9,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 
 # Install Python scripts
-file(GLOB SCRIPT_FILES scripts/*)
+file(GLOB SCRIPT_FILES scripts/*.py)
 install(
   PROGRAMS ${SCRIPT_FILES}
   DESTINATION lib/${PROJECT_NAME}
