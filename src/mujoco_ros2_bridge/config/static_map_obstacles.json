@@ -1,0 +1,100 @@
+{
+  "map": {
+    "resolution": 0.05,
+    "width": 400,
+    "height": 400,
+    "origin_x": -4.4,
+    "origin_y": -4.0
+  },
+  "obstacles": [
+    {
+      "name": "field_border",
+      "boxes": [
+        { "x_min": -0.05, "x_max": 12.05, "y_min": -0.05, "y_max": 0.0 },
+        { "x_min": -0.05, "x_max": 12.05, "y_min": 12.0, "y_max": 12.05 },
+        { "x_min": -0.05, "x_max": 0.0, "y_min": -0.05, "y_max": 12.05 },
+        { "x_min": 12.0, "x_max": 12.05, "y_min": -0.05, "y_max": 12.05 }
+      ]
+    },
+    {
+      "name": "right_platform_cliff_guard",
+      "boxes": [
+        { "x_min": 9.45, "x_max": 9.5, "y_min": 1.45, "y_max": 10.55 }
+      ]
+    },
+    {
+      "name": "first_floor_symmetry_wall",
+      "boxes": [
+        { "x_min": 1.55, "x_max": 9.95, "y_min": 5.95, "y_max": 6.05 }
+      ]
+    },
+    {
+      "name": "central_restricted_lower",
+      "boxes": [
+        { "x_min": 3.2, "x_max": 8.0, "y_min": 1.2, "y_max": 4.75 }
+      ]
+    },
+    {
+      "name": "central_restricted_upper",
+      "boxes": [
+        { "x_min": 3.2, "x_max": 8.0, "y_min": 7.25, "y_max": 10.8 }
+      ]
+    },
+    {
+      "name": "left_lower_corner_steps",
+      "boxes": [
+        { "x_min": 0.15, "x_max": 0.2, "y_min": 2.15, "y_max": 2.2 },
+        { "x_min": 0.15, "x_max": 0.3, "y_min": 2.2, "y_max": 2.25 },
+        { "x_min": 0.2, "x_max": 0.3, "y_min": 2.25, "y_max": 2.3 },
+        { "x_min": 0.15, "x_max": 0.3, "y_min": 2.3, "y_max": 2.45 },
+        { "x_min": 0.2, "x_max": 0.3, "y_min": 2.45, "y_max": 2.5 },
+        { "x_min": 0.15, "x_max": 0.3, "y_min": 2.5, "y_max": 2.65 },
+        { "x_min": 0.2, "x_max": 0.3, "y_min": 2.65, "y_max": 2.7 },
+        { "x_min": 0.15, "x_max": 0.3, "y_min": 2.7, "y_max": 2.85 },
+        { "x_min": 0.2, "x_max": 0.3, "y_min": 2.85, "y_max": 2.9 },
+        { "x_min": 0.15, "x_max": 0.3, "y_min": 2.9, "y_max": 2.95 }
+      ]
+    },
+    {
+      "name": "left_mid_barrier",
+      "boxes": [
+        { "x_min": 0.35, "x_max": 1.55, "y_min": 5.85, "y_max": 5.95 },
+        { "x_min": -0.05, "x_max": 1.55, "y_min": 5.95, "y_max": 6.05 },
+        { "x_min": 0.35, "x_max": 1.55, "y_min": 6.05, "y_max": 6.15 }
+      ]
+    },
+    {
+      "name": "right_mid_barrier",
+      "boxes": [
+        { "x_min": 9.95, "x_max": 11.55, "y_min": 5.85, "y_max": 6.15 }
+      ]
+    },
+    {
+      "name": "left_upper_edge_wall",
+      "boxes": [
+        { "x_min": -0.05, "x_max": 0.0, "y_min": 6.05, "y_max": 11.55 }
+      ]
+    },
+    {
+      "name": "left_upper_corner_steps",
+      "boxes": [
+        { "x_min": 0.15, "x_max": 0.3, "y_min": 9.05, "y_max": 9.1 },
+        { "x_min": 0.2, "x_max": 0.3, "y_min": 9.1, "y_max": 9.15 },
+        { "x_min": 0.15, "x_max": 0.3, "y_min": 9.15, "y_max": 9.3 },
+        { "x_min": 0.2, "x_max": 0.3, "y_min": 9.3, "y_max": 9.35 },
+        { "x_min": 0.15, "x_max": 0.3, "y_min": 9.35, "y_max": 9.5 },
+        { "x_min": 0.2, "x_max": 0.3, "y_min": 9.5, "y_max": 9.55 },
+        { "x_min": 0.15, "x_max": 0.3, "y_min": 9.55, "y_max": 9.7 },
+        { "x_min": 0.2, "x_max": 0.3, "y_min": 9.7, "y_max": 9.75 },
+        { "x_min": 0.15, "x_max": 0.3, "y_min": 9.75, "y_max": 9.85 },
+        { "x_min": -0.05, "x_max": 0.05, "y_min": 11.55, "y_max": 11.6 },
+        { "x_min": -0.05, "x_max": 0.1, "y_min": 11.6, "y_max": 11.7 },
+        { "x_min": -0.05, "x_max": 0.15, "y_min": 11.7, "y_max": 11.75 },
+        { "x_min": -0.05, "x_max": 0.2, "y_min": 11.75, "y_max": 11.85 },
+        { "x_min": -0.05, "x_max": 0.25, "y_min": 11.85, "y_max": 11.9 },
+        { "x_min": -0.05, "x_max": 0.3, "y_min": 11.9, "y_max": 12.0 },
+        { "x_min": -0.05, "x_max": 0.35, "y_min": 12.0, "y_max": 12.05 }
+      ]
+    }
+  ]
+}

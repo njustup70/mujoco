@@ -1,214 +1,170 @@
 #!/usr/bin/env python3
-import math
+import json
 import os
 from typing import Iterable
 
-import mujoco
 import numpy as np
 import rclpy
 from ament_index_python.packages import get_package_share_directory
+from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+from tf2_ros import StaticTransformBroadcaster
+
+
+STATIC_MAP_QOS = QoSProfile(
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+)
+
+def _default_config_path() -> str:
+    try:
+        package_share_dir = get_package_share_directory("mujoco_ros2_bridge")
+        return os.path.join(
+            package_share_dir, "config", "static_map_obstacles.json"
+        )
+    except Exception:
+        package_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(package_dir, "config", "static_map_obstacles.json")
 
 
 class StaticGridMapNode(Node):
-    """Publish a 2D occupancy grid from static MuJoCo collision geometry."""
+    """Publish the fixed field occupancy grid without simulator dependencies."""
 
     def __init__(self):
         super().__init__("static_grid_map_node")
 
-        default_model_path = self._default_model_path()
-        self.declare_parameter("model_path", default_model_path)
         self.declare_parameter("map_topic", "/map")
-        self.declare_parameter("frame_id", "odom")
-        self.declare_parameter("resolution", 0.05)
-        self.declare_parameter("origin_x", -10.0)
-        self.declare_parameter("origin_y", -10.0)
-        self.declare_parameter("width", 400)
-        self.declare_parameter("height", 400)
-        self.declare_parameter("occupied_height_min", 0.05)
-        self.declare_parameter("occupied_height_max", 2.0)
-        self.declare_parameter("collision_groups", [3])
-        self.declare_parameter("inflation_radius", 0.0)
-        self.declare_parameter("publish_period", 1.0)
+        self.declare_parameter("frame_id", "map")
+        self.declare_parameter("odom_frame_id", "odom")
+        self.declare_parameter("obstacle_config", _default_config_path())
         self.declare_parameter("save_map", False)
         self.declare_parameter("save_dir", "/tmp")
         self.declare_parameter("save_name", "static_map")
 
-        self.model_path = str(self.get_parameter("model_path").value)
         self.map_topic = str(self.get_parameter("map_topic").value)
         self.frame_id = str(self.get_parameter("frame_id").value)
-        self.resolution = float(self.get_parameter("resolution").value)
-        self.origin_x = float(self.get_parameter("origin_x").value)
-        self.origin_y = float(self.get_parameter("origin_y").value)
-        self.width = int(self.get_parameter("width").value)
-        self.height = int(self.get_parameter("height").value)
-        self.occupied_height_min = float(self.get_parameter("occupied_height_min").value)
-        self.occupied_height_max = float(self.get_parameter("occupied_height_max").value)
-        self.collision_groups = self._as_int_set(self.get_parameter("collision_groups").value)
-        self.inflation_radius = float(self.get_parameter("inflation_radius").value)
-        publish_period = float(self.get_parameter("publish_period").value)
+        self.odom_frame_id = str(self.get_parameter("odom_frame_id").value)
+        self.config_path = str(self.get_parameter("obstacle_config").value)
+        self.map_definition = self._load_map_definition(self.config_path)
 
-        self.publisher = self.create_publisher(OccupancyGrid, self.map_topic, 1)
+        map_config = self.map_definition["map"]
+        self.obstacles = self.map_definition["obstacles"]
+        self.resolution = float(map_config["resolution"])
+        self.origin_x = float(map_config["origin_x"])
+        self.origin_y = float(map_config["origin_y"])
+        self.width = int(map_config["width"])
+        self.height = int(map_config["height"])
+
+        self.static_tf_broadcaster = StaticTransformBroadcaster(self)
+        self.publisher = self.create_publisher(
+            OccupancyGrid, self.map_topic, STATIC_MAP_QOS
+        )
         self.grid = self._build_grid()
         self.map_msg = self._make_map_msg(self.grid)
 
         if bool(self.get_parameter("save_map").value):
             self._save_map_files(self.grid)
 
-        self.timer = self.create_timer(publish_period, self._publish_map)
+        self._publish_map_to_odom_tf()
         self._publish_map()
 
-    def _default_model_path(self) -> str:
-        try:
-            share_dir = get_package_share_directory("mujoco_ros2_bridge")
-            return os.path.join(share_dir, "model", "robot.xml")
-        except Exception:
-            return os.path.join(
-                os.getcwd(),
-                "src",
-                "mujoco_ros2_bridge",
-                "model",
-                "robot.xml",
+    def _load_map_definition(self, config_path: str) -> dict:
+        with open(config_path, "r", encoding="ascii") as config_file:
+            config = json.load(config_file)
+
+        if "map" not in config or "obstacles" not in config:
+            raise ValueError(
+                f"Static map config is missing required keys: {config_path}"
             )
 
-    def _as_int_set(self, value) -> set[int]:
-        if isinstance(value, (list, tuple)):
-            return {int(v) for v in value}
-        return {int(value)}
+        if not isinstance(config["obstacles"], list) or not config["obstacles"]:
+            raise ValueError(f"Static map config has no obstacles: {config_path}")
+
+        return config
 
     def _build_grid(self) -> np.ndarray:
-        if self.resolution <= 0.0:
-            raise ValueError("resolution must be positive")
-        if self.width <= 0 or self.height <= 0:
-            raise ValueError("width and height must be positive")
-
-        model = mujoco.MjModel.from_xml_path(self.model_path)
-        data = mujoco.MjData(model)
-        mujoco.mj_forward(model, data)
-
         grid = np.zeros((self.height, self.width), dtype=np.int8)
-        occupied_geoms = 0
 
-        for geom_id in range(model.ngeom):
-            if int(model.geom_group[geom_id]) not in self.collision_groups:
-                continue
-            if int(model.geom_type[geom_id]) != int(mujoco.mjtGeom.mjGEOM_MESH):
-                continue
-
-            mesh_id = int(model.geom_dataid[geom_id])
-            if mesh_id < 0:
-                continue
-
-            triangles = self._mesh_triangles_world(model, data, geom_id, mesh_id)
-            marked = self._rasterize_triangles(grid, triangles)
-            if marked:
-                occupied_geoms += 1
-
-        if self.inflation_radius > 0.0:
-            grid = self._inflate_grid(grid, self.inflation_radius)
+        for obstacle in self.obstacles:
+            name = str(obstacle["name"])
+            for box in obstacle["boxes"]:
+                row_start, row_end, col_start, col_end = self._box_to_grid_indices(
+                    name, box
+                )
+                grid[row_start : row_end + 1, col_start : col_end + 1] = 100
 
         occupied_cells = int(np.count_nonzero(grid == 100))
         self.get_logger().info(
-            f"Published static grid map from {occupied_geoms} geoms: "
+            f"Published fixed static grid map: "
             f"{self.width}x{self.height}, resolution={self.resolution:.3f} m, "
-            f"occupied_cells={occupied_cells}, groups={sorted(self.collision_groups)}"
+            f"occupied_cells={occupied_cells}, obstacles={len(self.obstacles)}, "
+            f"config={self.config_path}"
         )
         return grid
 
-    def _mesh_triangles_world(self, model, data, geom_id: int, mesh_id: int) -> np.ndarray:
-        vert_adr = int(model.mesh_vertadr[mesh_id])
-        vert_num = int(model.mesh_vertnum[mesh_id])
-        face_adr = int(model.mesh_faceadr[mesh_id])
-        face_num = int(model.mesh_facenum[mesh_id])
+    def _box_to_grid_indices(
+        self, obstacle_name: str, box: dict
+    ) -> tuple[int, int, int, int]:
+        x_min = float(box["x_min"])
+        x_max = float(box["x_max"])
+        y_min = float(box["y_min"])
+        y_max = float(box["y_max"])
 
-        verts_local = np.asarray(model.mesh_vert)[vert_adr : vert_adr + vert_num]
-        faces = np.asarray(model.mesh_face)[face_adr : face_adr + face_num]
+        if x_max <= x_min or y_max <= y_min:
+            raise ValueError(
+                f"Invalid box for obstacle '{obstacle_name}': {box}"
+            )
 
-        rot = np.asarray(data.geom_xmat[geom_id]).reshape(3, 3)
-        pos = np.asarray(data.geom_xpos[geom_id])
-        verts_world = verts_local @ rot.T + pos
-        return verts_world[faces]
+        col_start = self._aligned_index(
+            (x_min - self.origin_x) / self.resolution,
+            obstacle_name,
+            "x_min",
+        )
+        col_end_exclusive = self._aligned_index(
+            (x_max - self.origin_x) / self.resolution,
+            obstacle_name,
+            "x_max",
+        )
+        row_start = self._aligned_index(
+            (y_min - self.origin_y) / self.resolution,
+            obstacle_name,
+            "y_min",
+        )
+        row_end_exclusive = self._aligned_index(
+            (y_max - self.origin_y) / self.resolution,
+            obstacle_name,
+            "y_max",
+        )
 
-    def _rasterize_triangles(self, grid: np.ndarray, triangles: np.ndarray) -> bool:
-        marked_any = False
-        for tri in triangles:
-            min_z = float(np.min(tri[:, 2]))
-            max_z = float(np.max(tri[:, 2]))
-            if max_z < self.occupied_height_min or min_z > self.occupied_height_max:
-                continue
+        if not (
+            0 <= col_start < col_end_exclusive <= self.width
+            and 0 <= row_start < row_end_exclusive <= self.height
+        ):
+            raise ValueError(
+                f"Obstacle '{obstacle_name}' is outside the map bounds: {box}"
+            )
 
-            xs = tri[:, 0]
-            ys = tri[:, 1]
-            min_col = self._world_x_to_col(float(np.min(xs)))
-            max_col = self._world_x_to_col(float(np.max(xs)))
-            min_row = self._world_y_to_row(float(np.min(ys)))
-            max_row = self._world_y_to_row(float(np.max(ys)))
+        return (
+            row_start,
+            row_end_exclusive - 1,
+            col_start,
+            col_end_exclusive - 1,
+        )
 
-            min_col = max(0, min_col)
-            max_col = min(self.width - 1, max_col)
-            min_row = max(0, min_row)
-            max_row = min(self.height - 1, max_row)
-            if min_col > max_col or min_row > max_row:
-                continue
-
-            cols = np.arange(min_col, max_col + 1)
-            rows = np.arange(min_row, max_row + 1)
-            cell_x = self.origin_x + (cols + 0.5) * self.resolution
-            cell_y = self.origin_y + (rows + 0.5) * self.resolution
-            xx, yy = np.meshgrid(cell_x, cell_y)
-
-            mask = self._points_inside_triangle(xx, yy, tri[:, :2])
-            if np.any(mask):
-                grid[min_row : max_row + 1, min_col : max_col + 1][mask] = 100
-                marked_any = True
-        return marked_any
-
-    def _points_inside_triangle(self, xx: np.ndarray, yy: np.ndarray, tri_xy: np.ndarray) -> np.ndarray:
-        x1, y1 = tri_xy[0]
-        x2, y2 = tri_xy[1]
-        x3, y3 = tri_xy[2]
-
-        area = (x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1)
-        if abs(float(area)) < 1e-12:
-            return np.zeros_like(xx, dtype=bool)
-
-        d1 = (xx - x2) * (y1 - y2) - (x1 - x2) * (yy - y2)
-        d2 = (xx - x3) * (y2 - y3) - (x2 - x3) * (yy - y3)
-        d3 = (xx - x1) * (y3 - y1) - (x3 - x1) * (yy - y1)
-        has_neg = (d1 < 0.0) | (d2 < 0.0) | (d3 < 0.0)
-        has_pos = (d1 > 0.0) | (d2 > 0.0) | (d3 > 0.0)
-        return ~(has_neg & has_pos)
-
-    def _world_x_to_col(self, x: float) -> int:
-        return int(math.floor((x - self.origin_x) / self.resolution))
-
-    def _world_y_to_row(self, y: float) -> int:
-        return int(math.floor((y - self.origin_y) / self.resolution))
-
-    def _inflate_grid(self, grid: np.ndarray, radius: float) -> np.ndarray:
-        radius_cells = int(math.ceil(radius / self.resolution))
-        if radius_cells <= 0:
-            return grid
-
-        occupied_rows, occupied_cols = np.nonzero(grid == 100)
-        inflated = grid.copy()
-        offsets = self._disk_offsets(radius_cells)
-        for row, col in zip(occupied_rows, occupied_cols):
-            rr = row + offsets[:, 0]
-            cc = col + offsets[:, 1]
-            valid = (rr >= 0) & (rr < self.height) & (cc >= 0) & (cc < self.width)
-            inflated[rr[valid], cc[valid]] = 100
-        return inflated
-
-    def _disk_offsets(self, radius_cells: int) -> np.ndarray:
-        offsets = []
-        limit_sq = radius_cells * radius_cells
-        for dr in range(-radius_cells, radius_cells + 1):
-            for dc in range(-radius_cells, radius_cells + 1):
-                if dr * dr + dc * dc <= limit_sq:
-                    offsets.append((dr, dc))
-        return np.asarray(offsets, dtype=np.int32)
+    def _aligned_index(
+        self, value: float, obstacle_name: str, field_name: str
+    ) -> int:
+        rounded = round(value)
+        if abs(value - rounded) > 1e-6:
+            raise ValueError(
+                f"Obstacle '{obstacle_name}' field '{field_name}' is not aligned "
+                f"to the {self.resolution:.3f} m grid: {value}"
+            )
+        return int(rounded)
 
     def _make_map_msg(self, grid: np.ndarray) -> OccupancyGrid:
         msg = OccupancyGrid()
@@ -224,8 +180,15 @@ class StaticGridMapNode(Node):
         return msg
 
     def _publish_map(self):
-        self.map_msg.header.stamp = self.get_clock().now().to_msg()
         self.publisher.publish(self.map_msg)
+
+    def _publish_map_to_odom_tf(self):
+        transform = TransformStamped()
+        transform.header.stamp = self.get_clock().now().to_msg()
+        transform.header.frame_id = self.frame_id
+        transform.child_frame_id = self.odom_frame_id
+        transform.transform.rotation.w = 1.0
+        self.static_tf_broadcaster.sendTransform(transform)
 
     def _save_map_files(self, grid: np.ndarray):
         save_dir = str(self.get_parameter("save_dir").value)

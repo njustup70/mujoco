@@ -23,12 +23,12 @@
     <light pos="0  6 10." dir="0 0 -1"/>
     <light pos="0 -6 10." dir="0 0 -1"/>
 
-    <camera name="family_photo" pos="-8.583 -0.064 1.710" xyaxes="-0.010 -1.000 -0.000 0.544 -0.005 0.839" fovy="75"/>
-    <camera name="top_view" pos="0 0 20" xyaxes="0 -1 0 1 0 0"/>
+    <camera name="family_photo" pos="-2.983 5.936 1.710" xyaxes="-0.010 -1.000 -0.000 0.544 -0.005 0.839" fovy="75"/>
+    <camera name="top_view" pos="5.600 6.000 20" xyaxes="0 -1 0 1 0 0"/>
 
     <include file="../../../models/mjcf/kfs.xml"/>
 
-    <body name="scene" childclass="scene_attribute" pos="0.4 0 0">
+    <body name="scene" childclass="scene_attribute" pos="6.000 6.000 0">
       <body name="scene_visual">
         <geom type="mesh" mesh="robocon2026_0" class="scene_visual" material="robocon2026_mtl_9gg"/>
         <geom type="mesh" mesh="robocon2026_2" class="scene_visual" material="robocon2026_green"/>
