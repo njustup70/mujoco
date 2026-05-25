@@ -20,9 +20,10 @@ STATIC_MAP_QOS = QoSProfile(
     durability=DurabilityPolicy.TRANSIENT_LOCAL,
 )
 
+
 def _default_config_path() -> str:
     try:
-        package_share_dir = get_package_share_directory("mujoco_ros2_bridge")
+        package_share_dir = get_package_share_directory("map_pkg")
         return os.path.join(
             package_share_dir, "config", "static_map_obstacles.json"
         )
@@ -32,7 +33,7 @@ def _default_config_path() -> str:
 
 
 class StaticGridMapNode(Node):
-    """Publish the fixed field occupancy grid without simulator dependencies."""
+    """Publish the fixed field occupancy grid from a named obstacle config."""
 
     def __init__(self):
         super().__init__("static_grid_map_node")
