@@ -1,23 +1,52 @@
+#!/usr/bin/env python3
 import numpy as np
 from rclpy.node import Node
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import Twist
 from geometry_msgs.msg import Vector3Stamped
-import linear
-import mpc_acados as mpc
+import mpc
 import foxgloveTools
 from state_observer import PoseVelocityObserver,PoseVelocityESO
 
 class MPCControlNode(Node):
     def __init__(self):
         super().__init__('mpc_control_node')
+        self.declare_parameter('odom_topic', 'odom')
+        self.declare_parameter('cmd_vel_topic', 'cmd_vel')
+        self.declare_parameter('astar_path_topic', '/astar/path')
+        self.declare_parameter('target_yaw', 0.0)
+        self.declare_parameter('ref_speed', 1.0)
+        self.declare_parameter('goal_tolerance', 0.15)
+        self.declare_parameter('path_min_point_spacing', 0.10)
+        self.declare_parameter('start_when_path_received', True)
+
         self.dt = 0.1
+        self.odom_topic = str(self.get_parameter('odom_topic').value)
+        self.cmd_vel_topic = str(self.get_parameter('cmd_vel_topic').value)
+        self.astar_path_topic = str(self.get_parameter('astar_path_topic').value)
+        self.target_yaw = float(self.get_parameter('target_yaw').value)
+        self.ref_speed = float(self.get_parameter('ref_speed').value)
+        self.goal_tolerance = float(self.get_parameter('goal_tolerance').value)
+        self.path_min_point_spacing = float(
+            self.get_parameter('path_min_point_spacing').value
+        )
+        self.wait_for_path = bool(
+            self.get_parameter('start_when_path_received').value
+        )
+        self.path_received = False
+        self.goal_position: np.ndarray | None = None
+
         self.subscription = self.create_subscription(
             Odometry,
-            'odom',
+            self.odom_topic,
             self.odom_callback,
             0)
-        self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.path_subscription = self.create_subscription(
+            Path,
+            self.astar_path_topic,
+            self.path_callback,
+            10)
+        self.pub = self.create_publisher(Twist, self.cmd_vel_topic, 10)
         self.cmd_state_pub = self.create_publisher(Vector3Stamped, '/state/cmd_vel', 10)
         self.observer_state_pub = self.create_publisher(Vector3Stamped, '/state/observe_vel', 10)
         self.frame_id = 'odom'
@@ -30,15 +59,8 @@ class MPCControlNode(Node):
         self.ref_path_topic = '/mpc/reference_path'
         self.tracked_path_topic = '/mpc/tracked_path'
         # self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
-        self.path_follwer= mpc.AugmentedSwerveMPC(0.01, n_horizon=100)
+        self.path_follwer= mpc.MPCPathFollower(0.01, type='swerve')
         # self.path_follwer=AcadosMPC(0.05,model_type='swerve',n_horizon=100)
-        self.cube=linear.SplinePlanner()
-        # 生成一条简单的路径
-        target_points = np.array([[0, 0], [8, 8]])
-        # self.cube.generate_path(x_pts, y_pts, step_cm=10.0)
-        self.path_follwer.set_path(target_points, target_yaw=2.0, ref_speed=3.0)
-        # self.path_follwer.set_target_point(np.array([0.0, 2.0, 3.0]))  # 设置目标点
-        self._publish_reference_path_once()
         self.ref_path_timer = self.create_timer(0.5, self._publish_reference_path_once)
         self.initialized = False
         self.state_observer = PoseVelocityObserver(
@@ -65,6 +87,70 @@ class MPCControlNode(Node):
         self.thread.start()
         # asyncio.run_coroutine_threadsafe(test(), self.loop)
         # self.server=foxglove.start_server(port=8766)
+        self.get_logger().info(
+            f'MPC waiting for A* path on {self.astar_path_topic}; '
+            f'odom={self.odom_topic}, cmd_vel={self.cmd_vel_topic}'
+        )
+
+    def path_callback(self, msg: Path):
+        target_points = self._path_msg_to_points(msg)
+        if target_points is None:
+            return
+
+        try:
+            self.path_follwer.set_path(
+                target_points,
+                target_yaw=self.target_yaw,
+                ref_speed=self.ref_speed,
+            )
+        except Exception as exc:
+            self.get_logger().error(f'Failed to set MPC path: {exc}')
+            return
+
+        self.path_received = True
+        self.goal_position = target_points[-1].copy()
+        self._publish_reference_path_once()
+        self.get_logger().info(
+            f'Received A* path for MPC: raw_points={len(msg.poses)}, '
+            f'control_points={len(target_points)}, '
+            f'goal=({self.goal_position[0]:.2f}, {self.goal_position[1]:.2f})'
+        )
+
+    def _path_msg_to_points(self, msg: Path) -> np.ndarray | None:
+        if len(msg.poses) < 2:
+            self.get_logger().warn('Ignoring A* path with fewer than 2 poses')
+            return None
+
+        points = []
+        last_point = None
+        min_spacing = max(0.0, self.path_min_point_spacing)
+        for pose_stamped in msg.poses:
+            point = np.array(
+                [
+                    pose_stamped.pose.position.x,
+                    pose_stamped.pose.position.y,
+                ],
+                dtype=float,
+            )
+            if last_point is None or np.linalg.norm(point - last_point) >= min_spacing:
+                points.append(point)
+                last_point = point
+
+        final_point = np.array(
+            [
+                msg.poses[-1].pose.position.x,
+                msg.poses[-1].pose.position.y,
+            ],
+            dtype=float,
+        )
+        if not points or np.linalg.norm(final_point - points[-1]) > 1e-6:
+            points.append(final_point)
+
+        if len(points) < 2:
+            self.get_logger().warn('Ignoring A* path after downsampling')
+            return None
+
+        return np.vstack(points)
 
     def _publish_reference_path_once(self):
         planner = self.path_follwer.path_planner
@@ -81,6 +167,16 @@ class MPCControlNode(Node):
             np.array([measured_x, measured_y, 0.0], dtype=float),
             yaw=float(measured_theta),
         )
+
+    def _publish_zero_cmd(self):
+        self.pub.publish(Twist())
+
+    def _goal_reached(self, measured_x: float, measured_y: float) -> bool:
+        if self.goal_position is None:
+            return False
+        current = np.array([measured_x, measured_y], dtype=float)
+        return np.linalg.norm(current - self.goal_position) <= self.goal_tolerance
+
     from decorder import time_print
     # @time_print(10)
     def odom_callback(self, msg: Odometry):
@@ -112,6 +208,14 @@ class MPCControlNode(Node):
         self._append_tracked_pose(measured_x, measured_y, measured_theta)
 
         x_mpc = np.array([[measured_x], [measured_y], [measured_theta]])
+
+        if self.wait_for_path and not self.path_received:
+            self._publish_zero_cmd()
+            return
+
+        if self._goal_reached(measured_x, measured_y):
+            self._publish_zero_cmd()
+            return
 
         # 新模型下 U 直接是速度 [vx, vy, vw]
         

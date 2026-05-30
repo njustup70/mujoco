@@ -7,7 +7,12 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 
-file(GLOB SCRIPT_FILES scripts/*.py)
+set(SCRIPT_FILES
+  scripts/astar.py
+  scripts/astar_planner_node.py
+  scripts/cost_map_node.py
+  scripts/static_grid_map_node.py
+)
 install(
   PROGRAMS ${SCRIPT_FILES}
   DESTINATION lib/${PROJECT_NAME}

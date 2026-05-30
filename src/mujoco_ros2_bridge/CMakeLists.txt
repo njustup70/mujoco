@@ -9,7 +9,20 @@ endif()
 find_package(ament_cmake REQUIRED)
 
 # Install Python scripts
-file(GLOB SCRIPT_FILES scripts/*.py)
+set(SCRIPT_FILES
+  scripts/mujoco_node.py
+  scripts/odom_noise_node.py
+  scripts/swerve_solver.py
+  scripts/teleop_joy_node.py
+  ../mpc_pkg/control_node.py
+  ../mpc_pkg/decorder.py
+  ../mpc_pkg/forcempc.py
+  ../mpc_pkg/foxgloveTools.py
+  ../mpc_pkg/linear.py
+  ../mpc_pkg/mpc.py
+  ../mpc_pkg/mpc_acados.py
+  ../mpc_pkg/state_observer.py
+)
 install(
   PROGRAMS ${SCRIPT_FILES}
   DESTINATION lib/${PROJECT_NAME}
