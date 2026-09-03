@@ -237,7 +237,7 @@ class DuSwerveMPC(AcadosMPCBase):
         model = AcadosModel()
         model.name="swerve_du_model"
         x = SX.sym("x",3);u = SX.sym("u",3);p = SX.sym("p",6)
-        theta=x[2];v=u[0];alpha=u[1];vw=u[2]
+        theta=x[2];alpha=u[0];v=u[1];vw=u[2]
         f_expl=vertcat(
             v*cos(theta+alpha),v*sin(theta+alpha),vw
         )
@@ -252,8 +252,8 @@ class DuSwerveMPC(AcadosMPCBase):
         # input constraint
         # ----------------
         ocp.constraints.idxbu=np.arange(3)
-        ocp.constraints.lbu=np.array([-4.0,-np.pi*2,-2.0])
-        ocp.constraints.ubu=np.array([4.0,np.pi*2,2.0])
+        ocp.constraints.lbu=np.array([-np.pi*2,-4.0,-2.0])
+        ocp.constraints.ubu=np.array([np.pi*2,4.0,2.0])
         x=ocp.model.x;u=ocp.model.u;p=ocp.model.p
         # tracking error
         pos_err=x[0:2]-p[0:2]
@@ -262,12 +262,15 @@ class DuSwerveMPC(AcadosMPCBase):
             cos(x[2]-p[2])
         )
         # du
-        du=u-p[3:6]
-        
+        du=u[1:3]-p[4:6]
+        dalpha=atan2(
+            sin(u[0]-p[3]),
+            cos(u[0]-p[3])
+        )
         ocp.model.cost_y_expr=vertcat(
             pos_err,
             yaw_err,
-            du
+            du,dalpha
         )
         ocp.model.cost_y_expr_e=vertcat(
             pos_err,yaw_err
@@ -276,16 +279,10 @@ class DuSwerveMPC(AcadosMPCBase):
         ocp.cost.cost_type_e="NONLINEAR_LS"
         # 
         # [x误差,y误差,yaw误差,
-        #  dv,dalpha,dw]
+        #  dalpha,dv,dw]
         #
-        ocp.cost.W=np.diag([
-            20,
-            20,
-            20,
-
-            2,
-            5,
-            10
+        ocp.cost.W=np.diag([20,20,20,
+            5,2,10
         ])
         ocp.cost.W_e=np.diag([
             10,
@@ -328,63 +325,30 @@ class DuSwerveMPC(AcadosMPCBase):
                 self.last_u
             ]
         )
-
-
         self.solver.set(
             self.n_horizon,
             "p",
             p
         )
-
-
-
         # 初值
-
         self.solver.set(
             0,
             "lbx",
             x_current
         )
-
         self.solver.set(
             0,
             "ubx",
             x_current
         )
-
-
-
         status=self.solver.solve()
-
-
         if status!=0:
-            print(
-                "acados failed:",
-                status
-            )
-
-
-
-        u0=self.solver.get(
-            0,
-            "u"
-        )
-
-
-
+            print("acados failed:",status)
+        u0=self.solver.get(0,"u")
         # 保存上一控制
-
         self.last_u=u0.copy()
-
-
-
-        return np.array(
-            [
-                u0[0]*np.cos(u0[1]),
-                u0[0]*np.sin(u0[1]),
-                u0[2]
-            ]
+        return np.array([u0[1]*np.cos(u0[0]),u0[1]*np.sin(u0[0]),u0[2]]
         )
     def _process_output(self, u_0, x_1):
-            # 将 [v, alpha, vw] 转为 [vx, vy, vw] 适配底盘
-            return np.array([u_0[0]*cos(u_0[1]), u_0[0]*sin(u_0[1]), u_0[2]])
+            # 将 [alpha,v, vw] 转为 [vx, vy, vw] 适配底盘
+            return np.array([u_0[1]*cos(u_0[0]), u_0[1]*sin(u_0[0]), u_0[2]])
