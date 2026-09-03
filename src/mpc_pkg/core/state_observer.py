@@ -159,7 +159,7 @@ class PoseVelocityObserver:
             or abs(innovation[2, 0]) > self.reset_threshold_yaw
         )
 
-    @time_print(10)
+    # @time_print(10)
     def update(self, x: float, y: float, yaw: float, stamp_sec: float | None = None) -> np.ndarray:
         """输入位姿与时间戳, 输出车体系速度 [vx_body, vy_body, yaw_rate]。"""
         if stamp_sec is None:

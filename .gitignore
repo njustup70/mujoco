@@ -9,3 +9,4 @@ acados_ocp.json
 tmp/
 mpc_model_acados_ocp.json
 *_ocp.json
+*.npz

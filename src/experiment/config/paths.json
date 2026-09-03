@@ -1,0 +1,49 @@
+{
+    "reach_tol": 0.2,
+    "flip_angle_deg": 80.0,
+    "settle_delay": 1.0,
+    "paths": [
+        {
+            "name": "straight",
+            "waypoints": [
+                [
+                    0.0,
+                    0.0
+                ],
+                [
+                    8.0,
+                    8.0
+                ]
+            ],
+            "target_yaw": 0.7853981633974483,
+            "ref_speed": 3.0
+        },
+        {
+            "name": "s_curve",
+            "waypoints": [
+                [
+                    0.0,
+                    0.0
+                ],
+                [
+                    2.0,
+                    0.0
+                ],
+                [
+                    4.0,
+                    1.0
+                ],
+                [
+                    6.0,
+                    1.0
+                ],
+                [
+                    8.0,
+                    0.0
+                ]
+            ],
+            "target_yaw": 0.0,
+            "ref_speed": 2.5
+        }
+    ]
+}
