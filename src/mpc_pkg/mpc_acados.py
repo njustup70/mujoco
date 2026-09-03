@@ -220,3 +220,171 @@ class AugmentedSwerveMPC(AcadosMPCBase):
         v_next, alpha_next, vw_next = x_1[3:6]
         self.last_aug_state = np.array([v_next, alpha_next, vw_next])
         return np.array([v_next * cos(alpha_next), v_next * sin(alpha_next), vw_next])
+
+
+
+class DuSwerveMPC(AcadosMPCBase):
+    def __init__(self, dt=0.05, n_horizon=20):
+        self.last_u = np.zeros(3)
+        super().__init__(
+            dt,
+            n_horizon,
+            nx=3,
+            nu=3,
+            np_p=6
+        )
+    def _define_model(self):
+        model = AcadosModel()
+        model.name="swerve_du_model"
+        x = SX.sym("x",3);u = SX.sym("u",3);p = SX.sym("p",6)
+        theta=x[2];v=u[0];alpha=u[1];vw=u[2]
+        f_expl=vertcat(
+            v*cos(theta+alpha),v*sin(theta+alpha),vw
+        )
+        model.x=x;model.u=u;model.p=p;model.f_expl_expr=f_expl
+        model.f_impl_expr=SX.sym(
+            "xdot",3
+        )-f_expl
+        return model
+
+    def _setup_cost_and_constraints(self,ocp):
+        # ----------------
+        # input constraint
+        # ----------------
+        ocp.constraints.idxbu=np.arange(3)
+        ocp.constraints.lbu=np.array([-4.0,-np.pi*2,-2.0])
+        ocp.constraints.ubu=np.array([4.0,np.pi*2,2.0])
+        x=ocp.model.x;u=ocp.model.u;p=ocp.model.p
+        # tracking error
+        pos_err=x[0:2]-p[0:2]
+        yaw_err=atan2(
+            sin(x[2]-p[2]),
+            cos(x[2]-p[2])
+        )
+        # du
+        du=u-p[3:6]
+        
+        ocp.model.cost_y_expr=vertcat(
+            pos_err,
+            yaw_err,
+            du
+        )
+        ocp.model.cost_y_expr_e=vertcat(
+            pos_err,yaw_err
+        )
+        ocp.cost.cost_type="NONLINEAR_LS"
+        ocp.cost.cost_type_e="NONLINEAR_LS"
+        # 
+        # [x误差,y误差,yaw误差,
+        #  dv,dalpha,dw]
+        #
+        ocp.cost.W=np.diag([
+            20,
+            20,
+            20,
+
+            2,
+            5,
+            10
+        ])
+        ocp.cost.W_e=np.diag([
+            10,
+            10,
+            20
+        ])
+    def update(self,x_current):
+        if self.following:
+            s=self.path_planner.get_nearest_s(
+                x_current[0],
+                x_current[1]
+            )
+            s_query=(
+                s+
+                self.ref_speed*
+                self.dt*
+                np.arange(
+                    self.n_horizon+1
+                )
+            )
+            refs=self.path_planner.get_states_batch(
+                s_query
+            )
+            refs[:,2]=self.target_yaw
+        for k in range(self.n_horizon):
+            p=np.concatenate(
+                [
+                    refs[k,:3],
+                    self.last_u
+                ]
+            )
+            self.solver.set(
+                k,
+                "p",
+                p
+            )
+        p=np.concatenate(
+            [
+                refs[-1,:3],
+                self.last_u
+            ]
+        )
+
+
+        self.solver.set(
+            self.n_horizon,
+            "p",
+            p
+        )
+
+
+
+        # 初值
+
+        self.solver.set(
+            0,
+            "lbx",
+            x_current
+        )
+
+        self.solver.set(
+            0,
+            "ubx",
+            x_current
+        )
+
+
+
+        status=self.solver.solve()
+
+
+        if status!=0:
+            print(
+                "acados failed:",
+                status
+            )
+
+
+
+        u0=self.solver.get(
+            0,
+            "u"
+        )
+
+
+
+        # 保存上一控制
+
+        self.last_u=u0.copy()
+
+
+
+        return np.array(
+            [
+                u0[0]*np.cos(u0[1]),
+                u0[0]*np.sin(u0[1]),
+                u0[2]
+            ]
+        )
+    def _process_output(self, u_0, x_1):
+            # 将 [v, alpha, vw] 转为 [vx, vy, vw] 适配底盘
+            return np.array([u_0[0]*cos(u_0[1]), u_0[0]*sin(u_0[1]), u_0[2]])

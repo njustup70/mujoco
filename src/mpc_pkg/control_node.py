@@ -31,6 +31,7 @@ class MPCControlNode(Node):
         self.tracked_path_topic = '/mpc/tracked_path'
         # self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
         self.path_follwer= mpc.AugmentedSwerveMPC(0.01, n_horizon=100)
+        self.path_follwer=mpc.DuSwerveMPC(0.01, n_horizon=100)
         # self.path_follwer=AcadosMPC(0.05,model_type='swerve',n_horizon=100)
         self.cube=linear.SplinePlanner()
         # 生成一条简单的路径
