@@ -3,7 +3,7 @@ import numpy as np
 from typing import Optional, Union, Tuple
 from casadi import SX, vertcat, sin, cos,horzcat
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
-from linear import SplinePlanner
+from mpc_pkg.core.linear import SplinePlanner
 
 class AccMPCPathFollower:
     def __init__(

@@ -3,13 +3,14 @@ services:
     image: elainasuki/rc2026:mujoco
     container_name: mujoco
     environment:
-      - DISPLAY=${DISPLAY}
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=all
-      - OMP_WAIT_POLICY=passive
-      - TERM=xterm-256color
-      - RMW_IMPLEMENTATION=rmw_zenoh_cpp
-      - ROS_LOCALHOST_ONLY=1
+      PYTHONPATH: /home/Elaina/ros2_ws/src:$$PYTHONPATH
+      DISPLAY: ${DISPLAY}
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+      OMP_WAIT_POLICY: passive
+      TERM: xterm-256color
+      RMW_IMPLEMENTATION: rmw_zenoh_cpp
+      ROS_LOCALHOST_ONLY: 1
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix
       - /dev:/dev

@@ -216,7 +216,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--plot-script",
         type=str,
-        default="src/mpc_pkg/plot_path_tracking.py",
+        default="src/mpc_pkg/plot/plot_path_tracking.py",
         help="Path to the plotting script",
     )
     return parser.parse_args()

@@ -1,5 +1,5 @@
 import numpy as np
-from decorder import time_print
+from mpc_pkg.utils.decorder import time_print
 
 
 class PoseVelocityObserver:

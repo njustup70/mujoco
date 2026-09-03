@@ -109,7 +109,7 @@ def load_path_file(file_path: str | Path | None, role: str) -> dict[str, np.ndar
 
 
 def demo_paths() -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
-    from linear import SplinePlanner
+    from mpc_pkg.core.linear import SplinePlanner
 
     planner = SplinePlanner()
     x_ref, y_ref, yaw_ref = planner.generate_path(

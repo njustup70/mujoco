@@ -14,7 +14,8 @@
                 "njpwerner.autodocstring",
                 "ms-python.vscode-pylance",
                 "donjayamanne.githistory",
-                "mhutchie.git-graph"
+                "mhutchie.git-graph",
+                "Vizards.deepseek-v4-for-copilot"
             ]
         },
         "jetbrains": {

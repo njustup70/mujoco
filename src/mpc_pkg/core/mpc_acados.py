@@ -3,7 +3,7 @@ import numpy as np
 from abc import ABC, abstractmethod
 from casadi import SX, vertcat, cos, sin, atan2
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
-from linear import SplinePlanner
+from mpc_pkg.core.linear import SplinePlanner
 
 class AcadosMPCBase(ABC):
     '''
