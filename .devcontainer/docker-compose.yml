@@ -14,7 +14,6 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix
       - /dev:/dev
       - ./..:/home/Elaina/ros2_ws
-    runtime: "nvidia"
     tty: true
     network_mode: "host"
     pid: "host"
