@@ -38,13 +38,15 @@ class MujocoSimNode(Node):
         # 1. 加载模型
         try:
             package_share_dir = get_package_share_directory('mujoco_ros2_bridge')
-            model_path = os.path.join(package_share_dir, 'model', 'robot.xml')
+            model_path = os.path.join(package_share_dir, 'model', 'rc2027', 'scene.xml')
         except Exception:
-            model_path = 'src/mujoco_ros2_bridge/model/robot.xml'
+            model_path = os.path.abspath(os.path.join(
+                os.path.dirname(__file__), '..', 'model', 'rc2027', 'scene.xml'))
 
         self.get_logger().info(f'Loading MuJoCo model from: {model_path}')
         self.model = mujoco.MjModel.from_xml_path(model_path)
         self.data = mujoco.MjData(self.model)
+        mujoco.mj_forward(self.model, self.data)
         self.chassis_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'chassis')
 
         # 2. 通讯组件
