@@ -9,7 +9,8 @@ endif()
 find_package(ament_cmake REQUIRED)
 
 # Install Python scripts
-file(GLOB SCRIPT_FILES scripts/*)
+# CONFIGURE_DEPENDS: 新增脚本后增量构建也能自动纳入安装
+file(GLOB SCRIPT_FILES CONFIGURE_DEPENDS scripts/*)
 install(
   PROGRAMS ${SCRIPT_FILES}
   DESTINATION lib/${PROJECT_NAME}

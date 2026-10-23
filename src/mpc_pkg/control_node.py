@@ -1,6 +1,8 @@
+import time
+
 import numpy as np
 from rclpy.node import Node
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import Twist
 from geometry_msgs.msg import Vector3Stamped
 import linear
@@ -29,16 +31,31 @@ class MPCControlNode(Node):
         )
         self.ref_path_topic = '/mpc/reference_path'
         self.tracked_path_topic = '/mpc/tracked_path'
+        # motor 控制器的速度包络：与 DWA 的 v_max（nav.yaml）保持一致
+        self.declare_parameter('v_max', 1.2)
+        self.v_max = float(self.get_parameter('v_max').value)
+        # 参考速度：与 DWA 的 v_max 对齐，保证 MPC 视界（1 s）不超过局部路径长度
+        self.declare_parameter('ref_speed', 1.2)
+        self.ref_speed = float(self.get_parameter('ref_speed').value)
+        if self.ref_speed > self.v_max:
+            self.get_logger().warn(
+                f'ref_speed={self.ref_speed} 大于 v_max={self.v_max}，'
+                f'参考速度会被速度约束截断')
+
         # self.control.set_target_point(np.array([0.0, 10.0, 3.0]))  # 设置目标点
-        self.path_follwer= mpc.AugmentedSwerveMPC(0.01, n_horizon=100)
+        self.path_follwer = mpc.AugmentedSwerveMPC(
+            0.01, n_horizon=100, v_max=self.v_max)
         # self.path_follwer=AcadosMPC(0.05,model_type='swerve',n_horizon=100)
         self.cube=linear.SplinePlanner()
-        # 生成一条简单的路径
-        target_points = np.array([[0, 0], [8, 8]])
-        # self.cube.generate_path(x_pts, y_pts, step_cm=10.0)
-        self.path_follwer.set_path(target_points, target_yaw=2.0, ref_speed=3.0)
-        # self.path_follwer.set_target_point(np.array([0.0, 2.0, 3.0]))  # 设置目标点
-        self._publish_reference_path_once()
+
+        # 参考路径由 /local_plan 提供，不再硬编码
+        self.has_path = False
+        # /odom 实际跑到 200 Hz，而 MPC 按 dt=0.01 设计，必须节流到 100 Hz
+        self.solve_period = 0.01
+        self.last_solve_t = 0.0
+        self.local_plan_sub = self.create_subscription(
+            Path, '/local_plan', self.on_local_plan, 10)
+
         self.ref_path_timer = self.create_timer(0.5, self._publish_reference_path_once)
         self.initialized = False
         self.state_observer = PoseVelocityObserver(
@@ -81,6 +98,25 @@ class MPCControlNode(Node):
             np.array([measured_x, measured_y, 0.0], dtype=float),
             yaw=float(measured_theta),
         )
+    def on_local_plan(self, msg: Path):
+        """接收 DWA 输出的局部轨迹，作为 MPC 的参考路径。"""
+        if len(msg.poses) < 2:
+            return
+        pts = np.array([[p.pose.position.x, p.pose.position.y] for p in msg.poses])
+        # 剔除过近的重复点：样条要求弧长严格递增
+        keep = [0]
+        for k in range(1, len(pts)):
+            if np.hypot(pts[k, 0] - pts[keep[-1], 0],
+                        pts[k, 1] - pts[keep[-1], 1]) > 1e-3:
+                keep.append(k)
+        if len(keep) < 2:
+            return
+        pts = pts[keep]
+        self.path_follwer.set_path(pts, target_yaw=0.0, ref_speed=self.ref_speed)
+        if not self.has_path:
+            self.get_logger().info(f'收到局部轨迹 {len(pts)} 点，开始跟踪')
+        self.has_path = True
+
     from decorder import time_print
     # @time_print(10)
     def odom_callback(self, msg: Odometry):
@@ -110,6 +146,15 @@ class MPCControlNode(Node):
         self.observer_state_pub.publish(obs_msg)
 
         self._append_tracked_pose(measured_x, measured_y, measured_theta)
+
+        if not self.has_path:
+            return
+
+        # 节流：只按设计频率求解
+        now = time.monotonic()
+        if now - self.last_solve_t < self.solve_period:
+            return
+        self.last_solve_t = now
 
         x_mpc = np.array([[measured_x], [measured_y], [measured_theta]])
 

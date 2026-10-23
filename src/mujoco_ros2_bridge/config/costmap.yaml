@@ -1,0 +1,27 @@
+# 代价地图参数
+# 改完直接重启节点即可，不需要改代码。
+costmap_node:
+  ros__parameters:
+    # ---- 地图来源（唯一依据：MuJoCo 场景）----
+    scene: scene_demo.xml        # 包内 model/ 下的文件名，也可填绝对路径
+    scan_height: 3.0             # 投影射线起始高度 [m]
+    geometry_group: 0            # 只投影该组的 geom；机器人的 geom 标为 2
+
+    # ---- 栅格 ----
+    resolution: 0.05             # 每格边长 [m]
+    width_m: 20.0                # 场地边长 [m]，与场景一致
+    origin_x: 0.0                # 栅格原点（左下角）的世界坐标
+    origin_y: 0.0
+
+    # ---- 膨胀 ----
+    # 占用格                     -> lethal_cost
+    # d < inscribed              -> inscribed_cost，机器人中心不可能到达
+    # inscribed <= d < inflation -> inscribed_cost * (1 - t)^decay，t 由 0 到 1
+    # d >= inflation             -> 0
+    inscribed_radius: 0.48       # 机器人半宽 0.383 + 约 0.1 m 安全余量
+    inflation_radius: 1.00       # 膨胀外边界，一般取 2~2.5 倍内切圆
+    decay_power: 2.0             # 衰减指数：1=线性，2=较陡，4=紧贴障碍
+
+    # ---- 代价取值 ----
+    lethal_cost: 254
+    inscribed_cost: 253

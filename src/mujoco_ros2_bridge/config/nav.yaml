@@ -1,0 +1,36 @@
+# A* 全局规划 + DWA 局部规划参数
+# 修改后重启对应节点即可，不需要改代码。
+
+astar_planner:
+  ros__parameters:
+    lethal_threshold: 98      # 代价 >= 该值视为不可通行（代价图已缩放到 0~100）
+    cost_weight: 0.02         # 穿越高代价区的额外惩罚，越大越远离障碍
+    smooth_iterations: 80     # 拉普拉斯平滑迭代次数
+    smooth_alpha: 0.5         # 平滑步长，0.5 附近较稳
+    replan_period: 3.0        # 定期重规划周期 [s]
+    goal_tolerance: 0.3       # 到达判定 [m]
+
+dwa_planner:
+  ros__parameters:
+    # ---- 视界 ----
+    horizon: 1.5              # 前向模拟时长 [s]
+    sim_dt: 0.05              # 积分步长 [s]
+    control_rate: 10.0        # 重规划频率 [Hz]
+    # ---- 约束（必须与 MPC 模型对齐）----
+    v_max: 1.2
+    v_min: 0.0
+    w_max: 1.5
+    a_max: 1.0                # 线加速度上限 [m/s^2]
+    alpha_max: 2.0            # 角加速度上限 [rad/s^2]
+    # ---- 采样数 ----
+    n_vx: 5
+    n_vy: 5
+    n_wz: 7
+    # ---- 打分权重 ----
+    w_goal: 1.0               # 朝目标
+    w_clear: 0.5              # 离障碍（2.0 → 0.5，避免为避障左右摆）
+    w_vel: 0.3                # 速度
+    w_path: 1.2               # 贴全局路径（0.5 → 1.2，把车拉回路径）
+    # ---- 其他 ----
+    lookahead: 2.0            # 沿全局路径前视距离 [m]
+    lethal_threshold: 98

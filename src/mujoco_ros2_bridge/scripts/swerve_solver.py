@@ -44,7 +44,8 @@ class SwerveSolver:
                  steer_lag_alpha: float = 0.0,
                  drive_lag_alpha: float = 0.0,
                  steer_noise_std: float = 0.0,
-                 drive_noise_std: float = 0.0):
+                 drive_noise_std: float = 0.0,
+                 steer_rate_limit: float = 0.0):
         """
         初始化舵轮解算器。
         
@@ -55,6 +56,9 @@ class SwerveSolver:
             drive_lag_alpha: 驱动电机一阶滞后系数 (0 ~ 1)
             steer_noise_std: 舵控响应噪声标准差
             drive_noise_std: 驱动控响应噪声标准差
+            steer_rate_limit: 舵角速率上限 [rad/s]，<=0 表示不限制。
+                默认 0 是历史行为（指令阶跃），实际底盘舵机做不到瞬时转角，
+                高速时瞬间横摆会产生很大侧向冲击，建议在仿真/实车上启用。
         """
         self.wheels_pos = wheels_pos
         self.wheel_radius = wheel_radius
@@ -62,12 +66,15 @@ class SwerveSolver:
         self.drive_lag_alpha = drive_lag_alpha
         self.steer_noise_std = steer_noise_std
         self.drive_noise_std = drive_noise_std
+        self.steer_rate_limit = max(0.0, float(steer_rate_limit))
         
         # 舵轮目标角度统计（用于优劣弧选择）
         self.last_target_angles = [0.0] * len(wheels_pos)
         
         # 电机响应状态（一阶滞后）
-        self.last_steer_ctrl = [0.0] * len(wheels_pos)
+        # 舵角用 None 表示“尚未初始化”，首次调用对齐到实际舵角，
+        # 避免从 0 开始把已经在转的舵轮硬拽回去。
+        self.last_steer_ctrl = [None] * len(wheels_pos)
         self.last_drive_ctrl = [0.0] * len(wheels_pos)
 
     def solve(self, vx: float, vy: float, vyaw: float) -> list[tuple[float, float]]:
@@ -103,15 +110,17 @@ class SwerveSolver:
     def apply_motor_dynamics(self, 
                              target_steer_list: list[float], 
                              target_drive_list: list[float],
-                             current_steer_angles: list[float]) -> list[tuple[float, float]]:
+                             current_steer_angles: list[float],
+                             dt: float = 1e-3) -> list[tuple[float, float]]:
         """
-        应用电机一阶滞后和响应噪声。
+        应用电机一阶滞后、舵角速率限制和响应噪声。
         
         Args:
             target_steer_list: 目标舵角 (rad)
             target_drive_list: 目标驱动速度 (rad/s)
             current_steer_angles: 当前实际舵角 (rad) - 用于 2π 归一化
-            
+            dt: 控制/仿真步长 [s]，速率限制按它换算单步最大转角
+
         Returns:
             list[(steer_ctrl, drive_ctrl)] 最终电机指令
         """
@@ -123,14 +132,30 @@ class SwerveSolver:
             
             # 将目标舵角归一化到当前舵角附近，避免 ±π 跳变
             target_steer = wrap_to_near(target_steer, current_steer)
+
+            # 首次调用（或仿真重置后）对齐到实际舵角，避免从 0 开始追
+            if self.last_steer_ctrl[i] is None:
+                self.last_steer_ctrl[i] = float(current_steer)
             
-            # 一阶滞后更新（或直接用目标值）
+            # 一阶滞后（可选）：对目标角做平滑
             if self.steer_lag_alpha > 0:
                 self.last_steer_ctrl[i] = wrap_to_near(self.last_steer_ctrl[i], current_steer)
                 self.last_steer_ctrl[i] += self.steer_lag_alpha * (target_steer - self.last_steer_ctrl[i])
-                steer_output = self.last_steer_ctrl[i]
-            else:
-                steer_output = target_steer
+                target_steer = self.last_steer_ctrl[i]
+
+            # 速率限制：以上一帧输出为起点，按 rate*dt 逼近目标。
+            # 不能写成 "current + rate*dt"：position actuator 存在跟踪误差，
+            # 这样目标角每步只超前 current 一个步长，会被阻尼拖成极慢的爬行。
+            prev = self.last_steer_ctrl[i]
+            # 偏差过大（仿真重置 / 手动拖动）时直接对齐，避免长时间追不上
+            if abs(wrap_to_near(current_steer, prev) - prev) > 0.5:
+                prev = current_steer
+            delta = wrap_to_near(target_steer, prev) - prev
+            if self.steer_rate_limit > 0.0 and dt > 0.0:
+                max_step = self.steer_rate_limit * dt
+                delta = max(-max_step, min(max_step, delta))
+            steer_output = prev + delta
+            self.last_steer_ctrl[i] = steer_output
             
             if self.drive_lag_alpha > 0:
                 self.last_drive_ctrl[i] += self.drive_lag_alpha * (target_drive - self.last_drive_ctrl[i])
@@ -151,10 +176,11 @@ class SwerveSolver:
 
     def get_actuator_commands(self, 
                               vx: float, vy: float, vyaw: float, 
-                              current_steer_angles: list[float]) -> list[tuple[float, float]]:
+                              current_steer_angles: list[float],
+                              dt: float = 1e-3) -> list[tuple[float, float]]:
         """
         [接口解耦实现] 一个方法完成从底盘速度到电机执行指令的全过程转换。
-        封装了：运动学解算(IK)、优劣弧优化、一阶滞后、响应噪声。
+        封装了：运动学解算(IK)、优劣弧优化、一阶滞后、舵角速率限制、响应噪声。
         """
         # 1. 运动学解算
         target_steer_list, target_drive_list = zip(*self.solve(vx, vy, vyaw))
@@ -163,5 +189,6 @@ class SwerveSolver:
         return self.apply_motor_dynamics(
             list(target_steer_list),
             list(target_drive_list),
-            current_steer_angles
+            current_steer_angles,
+            dt=dt,
         )

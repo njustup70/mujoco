@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 演示场地 20x20 m，场地内坐标 [0,20] x [0,20]。
+     外墙向内占 0.1 m，保证墙体落在栅格内可被投影到。
+     机器人起点 (1.0, 1.0)，geom 标 group=2，供代价地图扫描时排除。 -->
+<mujoco model="demo_field_with_swerve">
+  <compiler angle="degree" coordinate="local" meshdir="./" />
+  <option gravity="0 0 -9.81" timestep="0.001" iterations="100" tolerance="1e-12">
+    <flag contact="enable" energy="enable" />
+  </option>
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.9 0.9 0.9" rgb2="0.82 0.82 0.82" width="512" height="512" />
+    <material name="mat_floor" texture="grid" texrepeat="20 20" texuniform="true" />
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="512" />
+    <texture name="texplane" type="2d" builtin="checker" rgb1=".2 .3 .4" rgb2=".1 0.15 0.2" width="512" height="512" mark="cross" markrgb=".8 .8 .8" />
+    <material name="matplane" reflectance="0.3" texture="texplane" texrepeat="2 2" texuniform="true" />
+  </asset>
+  <worldbody>
+    <light directional="true" diffuse=".8 .8 .8" specular=".2 .2 .2" pos="0 0 10" dir="0 0 -1" />
+    <geom name="floor" type="plane" size="30 30 0.1" rgba="0.95 0.95 0.95 1" material="mat_floor" />
+    <geom name="wall_s" type="box" size="10.0 0.05 1.0" pos="10 0.05 1.0" />
+    <geom name="wall_n" type="box" size="10.0 0.05 1.0" pos="10 19.95 1.0" />
+    <geom name="wall_w" type="box" size="0.05 10.0 1.0" pos="0.05 10 1.0" />
+    <geom name="wall_e" type="box" size="0.05 10.0 1.0" pos="19.95 10 1.0" />
+    <geom name="wall_mid_l" type="box" size="4.625 0.1 1.0" pos="4.625 7 1.0" />
+    <geom name="wall_mid_r" type="box" size="4.625 0.1 1.0" pos="15.375 7 1.0" />
+    <geom name="box_a" type="box" size="1.0 1.0 0.5" pos="14 14 0.5" />
+    <geom name="pillar" type="cylinder" size="0.4 1.0" pos="7 13 1.0" />
+    <geom name="L_h" type="box" size="1.5 0.15 1.0" pos="4 4 1.0" />
+    <geom name="L_v" type="box" size="0.15 1.5 1.0" pos="5.5 2.5 1.0" />
+    <geom name="crate" type="box" size="0.6 0.6 0.4" pos="16 4 0.4" />
+    <body name="chassis" pos="1.0 1.0 0.209" euler="0 0 0">
+      <freejoint name="root" />
+      <geom name="chassis_visual_main" type="box" size="0.4 0.4 0.08" pos="0 0 -0.0" rgba="0.8 0.3 0.3 1" contype="0" conaffinity="0" mass="0" group="2" />
+      <geom name="chassis_mass" type="box" size="0.35 0.25 0.04" pos="0.18 0.057 0.0" rgba="0.8 0.3 0.3 0" mass="16" contype="0" conaffinity="0" group="2" />
+      <body name="wheel0_pivot" pos="0.325 0.325 -0.093">
+        <joint name="wheel0_steer" type="hinge" axis="0 0 1" damping="2.0" armature="0.01" />
+        <geom type="cylinder" size="0.04 0.02" rgba="0.3 0.3 0.8 1" mass="0.5" contype="0" conaffinity="0" group="2" />
+        <body name="wheel0" pos="0 0 -0.058">
+          <joint name="wheel0_drive" type="hinge" axis="0 1 0" damping="2.0" armature="0.05" />
+          <geom type="cylinder" size="0.058 0.02" zaxis="0 1 0" rgba="0.2 0.2 0.2 1" friction="2.5 0.01 0.005" mass="1.0" contype="1" conaffinity="1" group="2" />
+        </body>
+      </body>
+      <body name="wheel1_pivot" pos="0.325 -0.325 -0.093">
+        <joint name="wheel1_steer" type="hinge" axis="0 0 1" damping="2.0" armature="0.01" />
+        <geom type="cylinder" size="0.04 0.02" rgba="0.3 0.3 0.8 1" mass="0.5" contype="0" conaffinity="0" group="2" />
+        <body name="wheel1" pos="0 0 -0.058">
+          <joint name="wheel1_drive" type="hinge" axis="0 1 0" damping="2.0" armature="0.05" />
+          <geom type="cylinder" size="0.058 0.02" zaxis="0 1 0" rgba="0.2 0.2 0.2 1" friction="2.5 0.01 0.005" mass="1.0" contype="1" conaffinity="1" group="2" />
+        </body>
+      </body>
+      <body name="wheel2_pivot" pos="-0.325 0.325 -0.093">
+        <joint name="wheel2_steer" type="hinge" axis="0 0 1" damping="2.0" armature="0.01" />
+        <geom type="cylinder" size="0.04 0.02" rgba="0.3 0.3 0.8 1" mass="0.5" contype="0" conaffinity="0" group="2" />
+        <body name="wheel2" pos="0 0 -0.058">
+          <joint name="wheel2_drive" type="hinge" axis="0 1 0" damping="2.0" armature="0.05" />
+          <geom type="cylinder" size="0.058 0.02" zaxis="0 1 0" rgba="0.2 0.2 0.2 1" friction="2.5 0.01 0.005" mass="1.0" contype="1" conaffinity="1" group="2" />
+        </body>
+      </body>
+      <body name="wheel3_pivot" pos="-0.325 -0.325 -0.093">
+        <joint name="wheel3_steer" type="hinge" axis="0 0 1" damping="2.0" armature="0.01" />
+        <geom type="cylinder" size="0.04 0.02" rgba="0.3 0.3 0.8 1" mass="0.5" contype="0" conaffinity="0" group="2" />
+        <body name="wheel3" pos="0 0 -0.058">
+          <joint name="wheel3_drive" type="hinge" axis="0 1 0" damping="2.0" armature="0.05" />
+          <geom type="cylinder" size="0.058 0.02" zaxis="0 1 0" rgba="0.2 0.2 0.2 1" friction="2.5 0.01 0.005" mass="1.0" contype="1" conaffinity="1" group="2" />
+        </body>
+      </body>
+      <geom name="head_marker" type="box" size="0.05 0.2 0.01" pos="0.18 0 0.07" rgba="0 1 0 1" contype="0" conaffinity="0" mass="0" group="2" />
+    </body>
+  </worldbody>
+  <actuator>
+    <position joint="wheel0_steer" name="steer0" kp="50" forcerange="-300 300" />
+    <velocity joint="wheel0_drive" name="drive0" kv="40" forcerange="-180 180" />
+    <position joint="wheel1_steer" name="steer1" kp="50" forcerange="-300 300" />
+    <velocity joint="wheel1_drive" name="drive1" kv="40" forcerange="-180 180" />
+    <position joint="wheel2_steer" name="steer2" kp="50" forcerange="-300 300" />
+    <velocity joint="wheel2_drive" name="drive2" kv="40" forcerange="-180 180" />
+    <position joint="wheel3_steer" name="steer3" kp="50" forcerange="-300 300" />
+    <velocity joint="wheel3_drive" name="drive3" kv="40" forcerange="-180 180" />
+  </actuator>
+</mujoco>

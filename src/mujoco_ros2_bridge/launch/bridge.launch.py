@@ -1,14 +1,26 @@
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 def generate_launch_description():
+    # scene 留空 = model/robot.xml；也可以填 scene_demo.xml（包内）或任意 XML 路径
+    scene_arg = DeclareLaunchArgument(
+        'scene',
+        default_value='',
+        description='MuJoCo 场景文件：绝对路径 / 相对路径 / 包内 model 下的文件名'
+    )
+
     return LaunchDescription([
+        scene_arg,
+
         # 1. 启动 MuJoCo 桥接节点 (仿真器)
         Node(
             package='mujoco_ros2_bridge',
             executable='mujoco_node.py',
             name='mujoco_node',
-            output='screen'
+            output='screen',
+            parameters=[{'scene': LaunchConfiguration('scene')}]
         ),
         
         # 2. odom_noise 逻辑已内聚到 mujoco_node.py，不再单独启动节点

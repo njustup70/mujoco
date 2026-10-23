@@ -26,6 +26,10 @@ class MujocoSimNode(Node):
         self.wheel_drive_noise_std = 0.1
         self.wheel_steer_lag_alpha = 0.0
         self.wheel_drive_lag_alpha = 0.0
+        # 舵角速率上限 [rad/s]：物理舵机无法瞬时转角，默认 6 rad/s（约 90°/0.26 s）。
+        # 之前默认 0（指令阶跃）会让高速斜向机动时轮组瞬间横摆，产生很大侧向冲击。
+        self.declare_parameter('steer_rate_limit', 6.0)
+        self.wheel_steer_rate_limit = float(self.get_parameter('steer_rate_limit').value)
         self.noise_cfg = OdomNoiseConfig(
             std_pos_100hz=0.0002,
             std_ori_100hz=0.002,
@@ -36,11 +40,32 @@ class MujocoSimNode(Node):
         self.noise_gen = OdomNoiseGenerator(self.noise_cfg)
 
         # 1. 加载模型
+        # scene 参数：绝对路径 / 相对路径 / 包内 model 目录下的文件名；留空用 robot.xml
+        self.declare_parameter('scene', '')
+        scene_arg = self.get_parameter('scene').value or ''
+
+        package_share_dir = None
         try:
             package_share_dir = get_package_share_directory('mujoco_ros2_bridge')
-            model_path = os.path.join(package_share_dir, 'model', 'robot.xml')
         except Exception:
+            pass
+
+        if scene_arg:
+            if os.path.isabs(scene_arg) or os.path.exists(scene_arg):
+                model_path = scene_arg
+            elif package_share_dir:
+                model_path = os.path.join(package_share_dir, 'model', scene_arg)
+            else:
+                model_path = os.path.join('src/mujoco_ros2_bridge/model', scene_arg)
+        elif package_share_dir:
+            model_path = os.path.join(package_share_dir, 'model', 'robot.xml')
+        else:
             model_path = 'src/mujoco_ros2_bridge/model/robot.xml'
+
+        if not os.path.exists(model_path):
+            self.get_logger().error(f'场景文件不存在: {model_path}，回退到 robot.xml')
+            model_path = os.path.join(
+                package_share_dir or 'src/mujoco_ros2_bridge', 'model', 'robot.xml')
 
         self.get_logger().info(f'Loading MuJoCo model from: {model_path}')
         self.model = mujoco.MjModel.from_xml_path(model_path)
@@ -80,6 +105,7 @@ class MujocoSimNode(Node):
             drive_lag_alpha=self.wheel_drive_lag_alpha,
             steer_noise_std=self.wheel_steer_noise_std,
             drive_noise_std=self.wheel_drive_noise_std,
+            steer_rate_limit=self.wheel_steer_rate_limit,
         )
 
         # 4. 定时器：100Hz 发布真值与带噪声 odom/TF
@@ -123,7 +149,8 @@ class MujocoSimNode(Node):
                 self.target_v_x,
                 self.target_v_y,
                 self.target_v_yaw,
-                current_steer_angles
+                current_steer_angles,
+                dt=self.model.opt.timestep,
             )
             
             # 3. 下达电机指令给 MuJoCo 促动器

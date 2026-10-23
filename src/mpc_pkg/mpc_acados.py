@@ -9,10 +9,14 @@ class AcadosMPCBase(ABC):
     '''
     基于纯位置输入的 MPC 基类，误差跟踪依靠p参数实现
     '''
-    def __init__(self, dt: float, n_horizon: int, nx: int, nu: int, np_p: int):
+    def __init__(self, dt: float, n_horizon: int, nx: int, nu: int, np_p: int,
+                 v_max: float = 1.2):
         self.dt = float(dt)
         self.n_horizon = n_horizon
         self.nx, self.nu, self.np_p = nx, nu, np_p
+        # 合成速度上限：与 DWA 的 v_max 保持一致，避免控制器允许的速度
+        # 超出底盘/轮胎稳定域（仿真里复合机动约 1.4 m/s 就开始明显侧倾）。
+        self.v_max = float(v_max)
         
         self.path_planner = SplinePlanner()
         self.following = False
@@ -98,8 +102,8 @@ class AcadosMPCBase(ABC):
         # 4. 获取结果并转化
         return self._process_output(self.solver.get(0, "u"), self.solver.get(1, "x"))
 class OmniMPC(AcadosMPCBase):
-    def __init__(self, dt=0.05, n_horizon=20):
-        super().__init__(dt, n_horizon, nx=3, nu=3, np_p=3)
+    def __init__(self, dt=0.05, n_horizon=20, v_max=1.2):
+        super().__init__(dt, n_horizon, nx=3, nu=3, np_p=3, v_max=v_max)
     def _define_model(self):
         model = AcadosModel()
         model.name = "omni_model"
@@ -113,10 +117,11 @@ class OmniMPC(AcadosMPCBase):
         model.f_impl_expr = SX.sym('x_dot', 3) - f_expl #type: ignore
         return model
     def _setup_cost_and_constraints(self, ocp):
-        # 约束
+        # 约束（vx/vy 仍按单轴限幅，合成速度的严格圆形约束需要非线性约束；
+        # 这里先保证每轴不超过 v_max，实际合成速度由 DWA 的圆约束兜底）
         ocp.constraints.idxbu = np.arange(3)
-        ocp.constraints.lbu = np.array([-3.0, -3.0, -2.0])
-        ocp.constraints.ubu = np.array([3.0, 3.0, 2.0])
+        ocp.constraints.lbu = np.array([-self.v_max, -self.v_max, -2.0])
+        ocp.constraints.ubu = np.array([self.v_max, self.v_max, 2.0])
         ocp.constraints.x0 = np.zeros(3)
         # 代价函数表达式
         pos_err = ocp.model.x[0:2] - ocp.model.p[0:2] #type: ignore
@@ -132,8 +137,8 @@ class OmniMPC(AcadosMPCBase):
         return u_0 # 直接返回 [vx, vy, vw]
 
 class SwerveMPC(AcadosMPCBase):
-    def __init__(self, dt=0.05, n_horizon=20):
-        super().__init__(dt, n_horizon, nx=3, nu=3, np_p=3)
+    def __init__(self, dt=0.05, n_horizon=20, v_max=1.2):
+        super().__init__(dt, n_horizon, nx=3, nu=3, np_p=3, v_max=v_max)
 
     def _define_model(self):
         model = AcadosModel()
@@ -150,8 +155,9 @@ class SwerveMPC(AcadosMPCBase):
 
     def _setup_cost_and_constraints(self, ocp):
         ocp.constraints.idxbu = np.arange(3)
-        ocp.constraints.lbu = np.array([-4.0, -np.pi, -2.0])
-        ocp.constraints.ubu = np.array([4.0, np.pi, 2.0])
+        # 舵轮等效速度 v 的合成上限，与 DWA 的 v_max 对齐
+        ocp.constraints.lbu = np.array([-self.v_max, -np.pi, -2.0])
+        ocp.constraints.ubu = np.array([self.v_max, np.pi, 2.0])
         ocp.constraints.x0 = np.zeros(3)
         assert isinstance(ocp.model.x,SX)
         pos_err = ocp.model.x[0:2] - ocp.model.p[0:2]
@@ -168,9 +174,9 @@ class SwerveMPC(AcadosMPCBase):
         # 将 [v, alpha, vw] 转为 [vx, vy, vw] 适配底盘
         return np.array([u_0[0]*cos(u_0[1]), u_0[0]*sin(u_0[1]), u_0[2]])
 class AugmentedSwerveMPC(AcadosMPCBase):
-    def __init__(self, dt=0.05, n_horizon=20):
+    def __init__(self, dt=0.05, n_horizon=20, v_max=1.2):
         self.last_aug_state = np.zeros(3) # [v, alpha, vw]
-        super().__init__(dt, n_horizon, nx=6, nu=3, np_p=3)
+        super().__init__(dt, n_horizon, nx=6, nu=3, np_p=3, v_max=v_max)
 
     def _define_model(self):
         model = AcadosModel()
@@ -190,8 +196,8 @@ class AugmentedSwerveMPC(AcadosMPCBase):
     def _setup_cost_and_constraints(self, ocp):
         # 状态约束 [v, alpha, vw]
         ocp.constraints.idxbx = np.array([3, 4, 5])
-        ocp.constraints.lbx = np.array([-4.0, -np.pi, -2.0])
-        ocp.constraints.ubx = np.array([4.0, np.pi, 2.0])
+        ocp.constraints.lbx = np.array([-self.v_max, -np.pi, -2.0])
+        ocp.constraints.ubx = np.array([self.v_max, np.pi, 2.0])
         # 控制约束 [dv, dalpha, dw]
         ocp.constraints.idxbu = np.arange(3)
         ocp.constraints.lbu = np.array([-2.0, -2.0, -3.0])
