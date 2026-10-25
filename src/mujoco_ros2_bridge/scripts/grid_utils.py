@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """栅格地图与坐标转换的公共工具，被 A* 与 DWA 共用。"""
+import math
+
 import numpy as np
 from nav_msgs.msg import OccupancyGrid
 
@@ -12,8 +14,8 @@ def grid_to_numpy(msg: OccupancyGrid) -> np.ndarray:
 
 def world_to_grid(x: float, y: float, info) -> tuple[int, int]:
     """世界坐标 -> 栅格索引 (i, j)。越界返回 (-1, -1)。"""
-    i = int((x - info.origin.position.x) / info.resolution)
-    j = int((y - info.origin.position.y) / info.resolution)
+    i = math.floor((x - info.origin.position.x) / info.resolution)
+    j = math.floor((y - info.origin.position.y) / info.resolution)
     if 0 <= i < info.width and 0 <= j < info.height:
         return i, j
     return -1, -1

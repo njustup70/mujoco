@@ -3,7 +3,7 @@
 用法：
     ros2 launch mujoco_ros2_bridge bringup.launch.py
     ros2 launch mujoco_ros2_bridge bringup.launch.py scene:=scene_demo.xml v_max:=1.2 ref_speed:=1.0
-    ros2 launch mujoco_ros2_bridge bringup.launch.py mpc_dir:=/path/to/src/mpc_pkg use_foxglove:=false
+    ros2 launch mujoco_ros2_bridge bringup.launch.py mpc_dir:=src/mpc_pkg use_foxglove:=false
 
 然后在另一个终端发终点：
     ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
@@ -21,16 +21,19 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def _default_mpc_dir() -> str:
-    """control_node.py 不在 ROS 包里，按常见工作区布局找一个可用目录。"""
+    """按通用工作区布局查找 mpc_pkg，不写死任何用户目录。"""
+    source_root = os.path.abspath(os.path.join(
+        os.path.dirname(os.path.realpath(__file__)), '..', '..'))
     candidates = [
+        os.environ.get('MPC_DIR', ''),
         os.path.join(os.getcwd(), 'src', 'mpc_pkg'),
-        os.path.expanduser('~/ros2_ws/src/mpc_pkg'),
-        '/home/Elaina/ros2_ws/src/mpc_pkg',
+        os.path.join(source_root, 'mpc_pkg'),
+        os.path.join(os.path.expanduser('~'), 'ros2_ws', 'src', 'mpc_pkg'),
     ]
     for path in candidates:
-        if os.path.isfile(os.path.join(path, 'control_node.py')):
+        if path and os.path.isfile(os.path.join(path, 'control_node.py')):
             return path
-    return candidates[0]
+    return candidates[1]
 
 
 def generate_launch_description():
@@ -56,7 +59,7 @@ def generate_launch_description():
             description='MPC 参考速度 [m/s]，建议 <= v_max，跟踪滞后时先降它'),
         DeclareLaunchArgument(
             'mpc_dir', default_value=_default_mpc_dir(),
-            description='mpc_pkg 目录（含 control_node.py）'),
+            description='mpc_pkg 目录（含 control_node.py；相对/绝对路径均可）'),
         DeclareLaunchArgument(
             'use_foxglove', default_value='true',
             description='是否启动 foxglove_bridge；没装就传 false'),

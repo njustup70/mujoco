@@ -3,6 +3,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, TransformStamped
 from geometry_msgs.msg import Vector3Stamped
+from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 import tf2_ros
 import mujoco
@@ -28,8 +29,16 @@ class MujocoSimNode(Node):
         self.wheel_drive_lag_alpha = 0.0
         # 舵角速率上限 [rad/s]：物理舵机无法瞬时转角，默认 6 rad/s（约 90°/0.26 s）。
         # 之前默认 0（指令阶跃）会让高速斜向机动时轮组瞬间横摆，产生很大侧向冲击。
-        self.declare_parameter('steer_rate_limit', 6.0)
+        self.declare_parameter('steer_rate_limit', 8.0)
         self.wheel_steer_rate_limit = float(self.get_parameter('steer_rate_limit').value)
+        # 动态障碍运动参数：x 方向正弦往返。
+        # 振幅 2.5 m（x 7.5~12.5）、0.025 Hz，最大速度约 0.39 m/s。
+        self.declare_parameter('dynamic_obstacle_amplitude', 2.5)
+        self.declare_parameter('dynamic_obstacle_frequency', 0.025)
+        self.dyn_obs_amplitude = float(
+            self.get_parameter('dynamic_obstacle_amplitude').value)
+        self.dyn_obs_frequency = float(
+            self.get_parameter('dynamic_obstacle_frequency').value)
         self.noise_cfg = OdomNoiseConfig(
             std_pos_100hz=0.0002,
             std_ori_100hz=0.002,
@@ -72,6 +81,18 @@ class MujocoSimNode(Node):
         self.data = mujoco.MjData(self.model)
         self.chassis_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'chassis')
 
+        # 动态障碍：必须是 mocap body，位置由仿真循环直接设置
+        self.dyn_obs_body_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_BODY, 'dynamic_obstacle')
+        self.dyn_obs_mocap_id = -1
+        if self.dyn_obs_body_id >= 0:
+            self.dyn_obs_mocap_id = int(
+                self.model.body_mocapid[self.dyn_obs_body_id])
+        self.dyn_obs_enabled = self.dyn_obs_mocap_id >= 0
+        if not self.dyn_obs_enabled:
+            self.get_logger().warn(
+                '场景没有 dynamic_obstacle mocap body，动态障碍关闭')
+
         # 2. 通讯组件
         self.cmd_vel_sub = self.create_subscription(Twist, 'cmd_vel', self.cmd_vel_callback, 10)
         # 发布带噪声里程计与 TF
@@ -80,6 +101,8 @@ class MujocoSimNode(Node):
         self.base_link_state_pub = self.create_publisher(Vector3Stamped, '/state/base_link', 10)
         self.real_vel_pub = self.create_publisher(Vector3Stamped, '/mujoco/real_vel', 10)
         self.state_test_pub = self.create_publisher(Vector3Stamped, '/state/test', 10)
+        # 动态障碍位姿：DWA 订阅后做局部避障，A* 仍使用静态地图
+        self.dyn_obs_pub = self.create_publisher(PoseStamped, '/dynamic_obstacle', 10)
 
         # 3. 状态变量
         self.target_v_x = 0.0
@@ -140,6 +163,15 @@ class MujocoSimNode(Node):
                 break
                 
             step_start = time.time()
+
+            # 动态障碍：x 方向正弦往返，y/z 固定；mocap body 直接设位置
+            if self.dyn_obs_enabled:
+                phase = 2.0 * np.pi * self.dyn_obs_frequency * self.data.time
+                self.data.mocap_pos[self.dyn_obs_mocap_id] = [
+                    10.0 + self.dyn_obs_amplitude * np.sin(phase),
+                    10.0,
+                    0.5,
+                ]
             
             # 1. 读取当前实际舵角 (底盘反馈)
             current_steer_angles = [self.data.qpos[self.steer_qposadr[i]] for i in range(4)]
@@ -237,6 +269,18 @@ class MujocoSimNode(Node):
         t.transform.rotation.z = noisy_quat[2]
         t.transform.rotation.w = noisy_quat[3]
         self.tf_broadcaster.sendTransform(t)
+
+        # 4. 发布动态障碍位姿（DWA 局部避障用）
+        if self.dyn_obs_enabled:
+            obs_pos = self.data.xpos[self.dyn_obs_body_id]
+            obs_msg = PoseStamped()
+            obs_msg.header.stamp = stamp_msg
+            obs_msg.header.frame_id = 'map'
+            obs_msg.pose.position.x = float(obs_pos[0])
+            obs_msg.pose.position.y = float(obs_pos[1])
+            obs_msg.pose.position.z = float(obs_pos[2])
+            obs_msg.pose.orientation.w = 1.0
+            self.dyn_obs_pub.publish(obs_msg)
 
     def destroy_node(self):
         self.stop_event.set()

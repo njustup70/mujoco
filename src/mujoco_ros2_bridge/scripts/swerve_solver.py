@@ -77,33 +77,66 @@ class SwerveSolver:
         self.last_steer_ctrl = [None] * len(wheels_pos)
         self.last_drive_ctrl = [0.0] * len(wheels_pos)
 
-    def solve(self, vx: float, vy: float, vyaw: float) -> list[tuple[float, float]]:
+    def solve(self, vx: float, vy: float, vyaw: float,
+              current_steer_angles: list[float] | None = None) -> list[tuple[float, float]]:
         """
         纯舵轮运动解算：根据底盘速度计算每个轮子的目标舵角和目标速度。
         
+        Args:
+            current_steer_angles: 当前实际舵角；传入时用它选优弧，
+                避免从上一次目标角出发选到绕远的一侧。
+
         Returns:
             list[(target_steer_rad, target_drive_rad_s)] 每个轮子的目标
         """
-        targets = []
+        n = len(self.wheels_pos)
+        speeds = [0.0] * n
+        desired = [0.0] * n
+        last = [0.0] * n
+
         for i, wheel_xy in enumerate(self.wheels_pos):
             v_ix, v_iy = decompose_wheel_velocity(vx, vy, vyaw, wheel_xy)
-            speed = math.hypot(v_ix, v_iy)
+            speeds[i] = math.hypot(v_ix, v_iy)
+            desired[i] = (math.atan2(v_iy, v_ix)
+                          if speeds[i] > 0.01 or abs(vyaw) > 0.01
+                          else self.last_target_angles[i])
+            last[i] = (float(current_steer_angles[i])
+                       if current_steer_angles is not None
+                       else self.last_target_angles[i])
 
-            # 默认保持上一步舵角，除非有明确的速度指令
+        # 低速平移时四轮统一选正转/反转，避免起步时四轮各选优弧、
+        # 出现两轮正转两轮反转把车体扭着转。正常行驶后仍用独立优弧，
+        # 保留避障时的灵活性。
+        low_speed = math.hypot(vx, vy) < 0.3
+        translational = (abs(vyaw) < 0.05
+                         and low_speed
+                         and all(s > 0.01 for s in speeds))
+        if translational:
+            def adiff(a, b):
+                return abs(math.atan2(math.sin(a - b), math.cos(a - b)))
+
+            err_a = sum(adiff(desired[i], last[i]) for i in range(n))
+            err_b = sum(adiff(desired[i] + math.pi, last[i]) for i in range(n))
+            flip = 0.0 if err_a <= err_b else math.pi
+
+            targets = []
+            for i in range(n):
+                target_steer = wrap_to_near(desired[i] + flip, last[i])
+                signed_speed = speeds[i] if flip == 0.0 else -speeds[i]
+                self.last_target_angles[i] = target_steer
+                targets.append((target_steer, signed_speed / self.wheel_radius))
+            return targets
+
+        # 正常行驶/自转/避障：保留四轮独立优弧
+        targets = []
+        for i in range(n):
             target_steer = self.last_target_angles[i]
-            signed_speed = speed
-            
-            if speed > 0.01 or abs(vyaw) > 0.01:
-                desired_steer = math.atan2(v_iy, v_ix)
+            signed_speed = speeds[i]
+            if speeds[i] > 0.01 or abs(vyaw) > 0.01:
                 target_steer, signed_speed = optimize_steer_arc(
-                    desired_steer,
-                    speed,
-                    self.last_target_angles[i],
-                )
-
+                    desired[i], speeds[i], last[i])
             self.last_target_angles[i] = target_steer
-            target_drive_rads = signed_speed / self.wheel_radius
-            targets.append((target_steer, target_drive_rads))
+            targets.append((target_steer, signed_speed / self.wheel_radius))
 
         return targets
 
@@ -132,6 +165,12 @@ class SwerveSolver:
             
             # 将目标舵角归一化到当前舵角附近，避免 ±π 跳变
             target_steer = wrap_to_near(target_steer, current_steer)
+
+            # 舵角还没到位时按误差降轮速：保留至少 50%，让舵轮边走边转，
+            # 不会为了消小弧而停在原地等舵角。
+            if self.steer_rate_limit > 0.0:
+                steer_err = abs(target_steer - current_steer)
+                target_drive *= max(0.5, 1.0 - steer_err / 1.0)
 
             # 首次调用（或仿真重置后）对齐到实际舵角，避免从 0 开始追
             if self.last_steer_ctrl[i] is None:
@@ -183,7 +222,8 @@ class SwerveSolver:
         封装了：运动学解算(IK)、优劣弧优化、一阶滞后、舵角速率限制、响应噪声。
         """
         # 1. 运动学解算
-        target_steer_list, target_drive_list = zip(*self.solve(vx, vy, vyaw))
+        target_steer_list, target_drive_list = zip(
+            *self.solve(vx, vy, vyaw, current_steer_angles))
         
         # 2. 应用电机动力学与噪声
         return self.apply_motor_dynamics(

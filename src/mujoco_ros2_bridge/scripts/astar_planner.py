@@ -17,6 +17,7 @@ from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import Bool
 
 from grid_utils import (grid_to_numpy, grid_to_world, make_path_msg,
                         world_to_grid, yaw_from_quaternion)
@@ -129,13 +130,11 @@ class AStarPlanner(Node):
         self.declare_parameter("smooth_iterations", 80)
         self.declare_parameter("smooth_alpha", 0.5)
         self.declare_parameter("replan_period", 3.0)
-        self.declare_parameter("goal_tolerance", 0.3)
 
         self.lethal = int(self.get_parameter("lethal_threshold").value)
         self.cost_w = float(self.get_parameter("cost_weight").value)
         self.smooth_it = int(self.get_parameter("smooth_iterations").value)
         self.smooth_a = float(self.get_parameter("smooth_alpha").value)
-        self.goal_tol = float(self.get_parameter("goal_tolerance").value)
         period = float(self.get_parameter("replan_period").value)
 
         qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -144,6 +143,7 @@ class AStarPlanner(Node):
                                  self.on_map, qos)
         self.create_subscription(PoseStamped, "/goal_pose", self.on_goal, 10)
         self.create_subscription(Odometry, "/odom", self.on_odom, 10)
+        self.create_subscription(Bool, "/dwa_active", self.on_dwa_active, 10)
         self.pub = self.create_publisher(Path, "/plan", 10)
 
         self.info = None
@@ -151,6 +151,7 @@ class AStarPlanner(Node):
         self.passable = None
         self.goal = None
         self.pose = None
+        self.dwa_active = False
 
         self.create_timer(period, self.try_plan)
         self.get_logger().info("A* 全局规划节点已启动，等待 /goal_pose")
@@ -168,6 +169,14 @@ class AStarPlanner(Node):
 
     def on_odom(self, msg: Odometry):
         self.pose = (msg.pose.pose.position.x, msg.pose.pose.position.y)
+
+    def on_dwa_active(self, msg: Bool):
+        was = self.dwa_active
+        self.dwa_active = bool(msg.data)
+        if was and not self.dwa_active:
+            # DWA 刚结束：从当前新位置重规划，避免切回旧的、仍穿过圆柱的 A* 路径
+            self.get_logger().info("DWA 结束，立即从当前位置重规划 A*")
+            self.try_plan()
 
     # ---------- 规划 ----------
     def try_plan(self):

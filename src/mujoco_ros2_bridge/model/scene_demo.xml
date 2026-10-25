@@ -28,6 +28,13 @@
     <geom name="L_h" type="box" size="1.5 0.15 1.0" pos="4 4 1.0" />
     <geom name="L_v" type="box" size="0.15 1.5 1.0" pos="5.5 2.5 1.0" />
     <geom name="crate" type="box" size="0.6 0.6 0.4" pos="16 4 0.4" />
+    <!-- 动态障碍：mocap body，位置由 mujoco_node 按正弦更新。
+         group=2 避开 costmap 的 group 0 静态投影；contype=0 先不参与物理碰撞，
+         只用于验证 DWA 的动态避障逻辑。 -->
+    <body name="dynamic_obstacle" mocap="true" pos="10 10 0.5">
+      <geom name="dynamic_obstacle_geom" type="cylinder" size="0.4 0.5"
+            mass="2.0" rgba="1 0.5 0.8 0.8" contype="0" conaffinity="0" group="2" />
+    </body>
     <body name="chassis" pos="1.0 1.0 0.209" euler="0 0 0">
       <freejoint name="root" />
       <geom name="chassis_visual_main" type="box" size="0.4 0.4 0.08" pos="0 0 -0.0" rgba="0.8 0.3 0.3 1" contype="0" conaffinity="0" mass="0" group="2" />

@@ -1,4 +1,5 @@
 import os
+import json
 import numpy as np
 from abc import ABC, abstractmethod
 from casadi import SX, vertcat, cos, sin, atan2
@@ -66,7 +67,19 @@ class AcadosMPCBase(ABC):
         #初始化W
         ocp.cost.W_0 = ocp.cost.W
         # ocp.model.c
-        json_name = f"mpc_ocp.json"
+        json_name = "mpc_ocp.json"
+        # 移动工作区后，旧 JSON 里的 code_export_directory 可能仍指向旧绝对路径；
+        # 发现不一致就删除，让 acados 在当前目录重新生成。
+        expected_code = os.path.abspath("c_generated_code")
+        if os.path.isfile(json_name):
+            try:
+                with open(json_name) as f:
+                    meta = json.load(f)
+                export = meta.get("code_export_directory", "")
+                if export and os.path.abspath(export) != expected_code:
+                    os.remove(json_name)
+            except Exception:
+                pass
         return AcadosOcpSolver(ocp, json_file=json_name, verbose=False)
     def set_path(self, points: np.ndarray, target_yaw: float, ref_speed: float = 1.0):
         """设置跟踪路径"""
@@ -199,21 +212,32 @@ class AugmentedSwerveMPC(AcadosMPCBase):
         ocp.constraints.lbx = np.array([-self.v_max, -np.pi, -2.0])
         ocp.constraints.ubx = np.array([self.v_max, np.pi, 2.0])
         # 控制约束 [dv, dalpha, dw]
+        # dalpha 从 ±2 放宽到 ±4 rad/s，让运动方向更快转到目标方向；
+        # 舵轮舵角速率上限是 6 rad/s，4 rad/s 仍有余量。
         ocp.constraints.idxbu = np.arange(3)
-        ocp.constraints.lbu = np.array([-2.0, -2.0, -3.0])
-        ocp.constraints.ubu = np.array([2.0, 2.0, 3.0])
+        ocp.constraints.lbu = np.array([-2.0, -4.0, -3.0])
+        ocp.constraints.ubu = np.array([2.0, 4.0, 3.0])
         ocp.constraints.x0 = np.zeros(6)
         assert isinstance(ocp.model.x,SX)
         pos_err = ocp.model.x[0:2] - ocp.model.p[0:2]
-        wrapped_angle_diff = atan2(sin(ocp.model.x[2] - ocp.model.p[2]), cos(ocp.model.x[2] - ocp.model.p[2]))
+        # 用运动方向 theta+alpha 跟踪参考路径切线，而不是车体朝向 theta。
+        # 舵轮可以车头保持不动、四轮转向斜行/横移，不必先转车体再移动。
+        move_dir_err = (ocp.model.x[2] + ocp.model.x[4]) - ocp.model.p[2]
+        wrapped_angle_diff = atan2(sin(move_dir_err), cos(move_dir_err))
         
         # Cost: [误差(3), 状态(3), 控制率(3)]
         ocp.model.cost_y_expr = vertcat(pos_err, wrapped_angle_diff, ocp.model.x[3:6], ocp.model.u)
         ocp.model.cost_y_expr_e = vertcat(pos_err, wrapped_angle_diff, ocp.model.x[3:6])
         
         ocp.cost.cost_type = ocp.cost.cost_type_e = 'NONLINEAR_LS'
-        ocp.cost.W = np.diag([2.0, 2.0, 2.0, 0, 0, 0, 0.1, 0.5, 0.5])
-        ocp.cost.W_e = np.diag([8.0, 8.0, 8.0, 0.2, 0.2, 0.2])
+        # vw 项 0.8：theta 没有绝对参考时，MPC 会利用“车体转动 + alpha 反向”
+        # 这个冗余自由度保持运动方向不变，表现为原地自转；加大 omega 惩罚。
+        ocp.cost.W = np.diag([2.0, 2.0, 2.0, 0, 0, 0.8, 0.1, 0.5, 0.5])
+        ocp.cost.W_e = np.diag([8.0, 8.0, 8.0, 0.2, 0.2, 0.8])
+
+    def reset_aug_state(self, alpha: float = 0.0):
+        """新目标起步时把速度状态对齐到路径方向，避免 MPC 先转 alpha。"""
+        self.last_aug_state = np.array([0.0, float(alpha), 0.0])
 
     def update(self, x_current: np.ndarray) -> np.ndarray:
         """重写 update 以处理增广状态的拼接"""
