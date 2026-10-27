@@ -4,6 +4,7 @@
     "service": "gpu-service",
     "workspaceFolder": "/home/Elaina/ros2_ws",
     "remoteUser": "Elaina",
+    "postCreateCommand": "sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libglx-mesa0 libgl1-mesa-dri libegl1 libegl-mesa0 libx11-6 libxext6 libxrender1 libxi6 libxrandr2 libxinerama1 libxcursor1 libxfixes3 libxkbcommon0 mesa-utils x11-utils",
     "shutdownAction": "stopCompose",
     "customizations": {
         "vscode": {

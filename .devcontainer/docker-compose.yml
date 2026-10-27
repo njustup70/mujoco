@@ -4,6 +4,10 @@ services:
     container_name: mujoco
     environment:
       - DISPLAY=${DISPLAY}
+      - MUJOCO_GL=glfw
+      - LIBGL_ALWAYS_SOFTWARE=1
+      - MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
+      - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libGL.so.1
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       - OMP_WAIT_POLICY=passive
